@@ -1,0 +1,289 @@
+goal: |
+  어떻게 보면 만능인거지
+  1. 비즈니스 요구사항에 맞게 쿼리 만들고 검증
+  2. 사용자가 쿼리를 입력하면 검증
+  3. 자연어로 운영중인 시스템의 쿼리를 조회해서 개선
+task_type: code
+brownfield_context:
+  project_type: brownfield
+  context_references:
+    - path: /home/ubuntu/edu/AX/sds-ax-practice/mini-pjt
+      role: primary
+      summary: Oracle SQL 실행계획 성능진단 Agent 저장소
+    - path: src/tools.py
+      role: migration_target
+      summary: 직접 Oracle 접속과 SQLcl MCP 확장 경로가 함께 있어 대상 DB 접근을 SQLcl MCP 단일 경로로 정리해야 한다
+    - path: src/agents.py
+      role: migration_target
+      summary: explain_agent와 knowledge_agent를 supervisor가 조율하는 기존 Multi-Agent 구성
+    - path: src/plan_execute.py
+      role: migration_target
+      summary: 계획·실행·재계획·최종화 그래프와 프로세스 내 InMemoryStore 캐시
+    - path: README.md
+      role: reference
+      summary: 서비스 아키텍처, 실행 방법, 트라이앤에러 회고, 평가 결과를 기록하는 제출 문서
+    - path: SERVICE.md
+      role: reference
+      summary: 사용자·문제·가치, 서비스 정책, 성공 기준을 정의하는 서비스 기획 문서
+    - path: evaluation/test_queries.csv
+      role: reference
+      summary: positive, edge, negative, guardrail 기존 평가 세트와 새 후보 검색 fixture의 원천
+    - path: docker-compose.yml
+      role: migration_target
+      summary: Oracle과 Langfuse 의존성을 정의한 기존 Compose 파일. API 서비스와 SQLcl MCP 실행 환경까지 포함해 단일 배포 진입점으로 정리한다
+    - path: static/index.html
+      role: migration_target
+      summary: 기존 데모 UI. SQL 생성, SQL 사전 검증, 운영 SQL 후보 선택·성능 진단의 세 흐름을 시연할 수 있게 확장한다
+    - path: src/tracing.py
+      role: migration_target
+      summary: UI에 노출되는 FileTracer와 Langfuse 콜백의 공통 마스킹·관측 경계를 정리한다
+    - path: run_eval.py
+      role: migration_target
+      summary: 기존 평가 세트와 round1_report.md, round2_report.md 생성 흐름을 새 정책에 맞게 유지한다
+    - path: evaluation/round1_report.md
+      role: reference
+      summary: 미니 프로젝트 제출용 1차 평가 결과 문서
+    - path: evaluation/round2_report.md
+      role: reference
+      summary: 미니 프로젝트 제출용 2차 평가 결과 문서
+    - path: db/init/01_setup_schema_and_data.sql
+      role: migration_target
+      summary: Oracle 데모 스키마와 성능 이슈 데이터를 적재하는 초기화 스크립트. 후보 검색과 실행계획 진단 시연을 위해 보강한다
+  existing_patterns:
+    - FastAPI API와 LangGraph 기반 Plan-Execute 그래프
+    - SQLcl MCP 도구 소비 경로
+    - Oracle 튜닝 RAG와 Chroma 지식 검색
+    - HITL 승인 그래프와 SQLite 체크포인트
+    - LCEL 구조화 출력, ReAct 에이전트, 입력·도구 출력·RAG 결과 가드레일
+    - FileTracer와 Langfuse 콜백 기반 관측성
+    - RAGAS와 LLM-as-Judge를 병행하는 평가 리포트
+    - Docker Compose 기반 Oracle과 Langfuse 로컬 기동 환경
+    - 단일 HTML 기반 데모 UI와 Oracle 초기화 SQL 데이터셋
+  existing_dependencies:
+    - FastAPI
+    - LangChain, LangGraph, langgraph-supervisor
+    - langchain-mcp-adapters와 SQLcl MCP
+    - SQLite, Chroma, RAGAS
+    - Langfuse
+    - pytest
+    - Docker Compose
+constraints:
+  - UPDATE 또는 DELETE가 포함된 입력 SQL은 어떤 DB 또는 MCP 호출보다 먼저 코드 기반 가드레일에서 차단하고, SELECT 조회문만 입력할 수 있다고 안내한다.
+  - 사용자 SQL은 단일 SELECT 또는 WITH 조회문만 대상으로 하며, 실행계획 평가에서 안전 기준을 통과한 경우에만 제한 실행한다.
+  - Oracle 대상 DB의 스키마 조회, SQL 후보 탐색, 실행계획 조회, 제한 실행은 Oracle SQLcl MCP만 사용한다. 직접 DB 드라이버 접속 경로는 사용하지 않는다.
+  - SQLite는 서비스 상태와 장기기억 전용이다. Oracle 대상 DB를 대체하거나 운영 SQL을 저장하는 원천 DB가 아니다.
+  - 자연어 후보 목록에는 사용자가 식별할 수 있도록 마스킹된 SQL 원문을 표시한다.
+  - 범위 밖 요청은 general_agent로 라우팅하며 supervisor는 직접 사용자 답변을 생성하지 않는다.
+  - query_planner_agent는 비즈니스 요구사항에서 SQL을 설계할 때 Plan-Execute 패턴을 사용한다.
+  - 실행계획 원문은 사용자에게 직접 입력받지 않고, 허용된 SQL에 대해 시스템이 SQLcl MCP로 새로 조회한다.
+  - 장기기억의 원본은 SQLite이며, Chroma는 Oracle 튜닝 지식 문서의 RAG 검색용으로만 유지한다.
+  - 입력, SQLcl MCP 도구 출력, RAG 검색 문서는 지시문이 아닌 데이터로 취급하고 개인정보·자격증명은 외부 LLM 전송 전에 마스킹한다.
+  - 인덱스 생성과 통계 재수집 같은 쓰기 도구는 advisory로만 제공하며, 사용자가 별도 적용을 요청하면 HITL 승인 없이는 실행하지 않는다.
+  - FileTracer의 요청별 trace 응답과 Langfuse 관측 경로는 유지한다. 관측 도구 실패가 API 요청 자체를 실패시키면 안 된다.
+  - RAGAS 4지표는 positive와 edge 케이스에만 적용한다. negative와 guardrail은 거부·마스킹 여부를 규칙 기반으로 평가한다.
+  - docker compose up --build 한 번으로 API, Oracle 대상 DB, 필요한 관측성 의존성을 기동할 수 있어야 하며, 비밀값·포트·볼륨은 .env와 문서로 설정한다.
+  - 기존 프런트엔드는 유지하고, SQL 생성, 직접 SQL 검증, 자연어 운영 성능 진단의 세 흐름과 후보 선택 상태를 사용자가 시연할 수 있게 한다.
+  - 데모 데이터는 SQL 생성에 필요한 스키마 정보, 후보 검색용 운영 SQL, 실행계획 이슈와 개선 근거를 보여줄 수 있는 대표 시나리오를 포함한다.
+  - SQL 생성, 직접 SQL 검증, 후보 탐색·선택, 승인 작업은 승인책임자만 사용할 수 있다. 데모에서는 .env의 고정 토큰과 X-Approver-Token 헤더를 사용하며, 토큰 누락은 401, 불일치는 403으로 처리한다.
+  - 권한 검증 실패 요청은 SQLcl MCP 호출과 checkpoints.sqlite·memory.sqlite 쓰기를 전혀 수행하지 않는다. 승인된 요청은 사용자 식별자, 시각, 작업, 결과를 감사 기록으로 남긴다.
+  - 민감정보는 UI·API 응답, LLM 입력, Langfuse·FileTracer trace, 로그, checkpoints.sqlite, memory.sqlite에 기록되기 전에 마스킹한다. 후보 SQL은 구조를 보여주되 식별값과 리터럴을 마스킹한다.
+  - Agent system prompt는 src/prompts 아래 역할별 모듈로 분리해 import하여 사용하며, 역할과 프롬프트 모듈의 일대일 대응을 검증한다.
+  - 기존 미니 프로젝트의 FastAPI 서비스, src·data·evaluation 문서 구조, /query 진입점, 답변·근거·trace 응답 계약, README·SERVICE·평가 산출물 제출 규약은 유지한다. 새 세 흐름에 충돌하는 기존 고정 키워드 매칭과 SQL 직접 입력 금지 정책만 대체한다.
+acceptance_criteria:
+  - id: ac_approver_access_control
+    description: 보호된 세 흐름과 승인 작업은 유효한 X-Approver-Token에서만 동작한다. 누락 토큰은 401, 잘못된 토큰은 403이며 두 경우 모두 SQLcl MCP 호출과 SQLite 쓰기가 없고, 성공 요청은 마스킹된 감사 기록을 남긴다.
+    verify_command: pytest -q tests/test_approver_access_control.py
+  - id: ac_sensitive_data_masking
+    description: 이메일, 전화번호, 사번, 비밀번호와 SQL 리터럴을 포함한 fixture가 UI·API·LLM payload·trace·로그·두 SQLite 저장소 어느 곳에도 원문으로 남지 않고 후보 SQL 구조는 읽을 수 있다.
+    verify_command: pytest -q tests/test_sensitive_data_masking.py
+  - id: ac_block_mutating_sql
+    description: UPDATE 또는 DELETE를 포함한 SQL 입력은 SQLcl MCP를 호출하지 않고 status=blocked 및 SELECT 조회문만 입력하라는 이유를 반환한다.
+    verify_command: pytest -q tests/test_sql_guardrails.py
+  - id: ac_validate_submitted_select
+    description: 단일 SELECT 또는 WITH SQL 입력은 accept, revise, reject 중 하나와 근거를 반환한다. accept 결과에는 query_name, reviewed_at, review_id가 들어간 SQL 주석이 포함된다.
+    verify_command: pytest -q tests/test_sql_validation.py
+  - id: ac_plan_risk_gate
+    description: SQLcl MCP 실행계획 평가가 안전 기준을 통과한 SELECT만 제한 실행 및 실제 통계 수집을 요청한다. 기준을 넘는 SELECT는 실행하지 않고 예상 실행계획 기반 진단을 반환한다.
+    verify_command: pytest -q tests/test_plan_risk_gate.py
+  - id: ac_candidate_search
+    description: 자연어 운영 성능 요청은 마스킹된 SQL 원문을 포함한 후보 목록을 반환하고, 후보 검색 평가 fixture의 기대 SQL은 반환 후보 목록에 포함된다.
+    verify_command: pytest -q tests/test_candidate_search.py
+  - id: ac_business_query_plan_execute
+    description: 비즈니스 요구사항 요청은 요구사항 계획, SQLcl MCP 스키마 조회, SELECT 초안 생성, SQL 검증, 실행계획 검토 순서로 처리된다.
+    verify_command: pytest -q tests/test_query_planner.py
+  - id: ac_mcp_only_oracle_access
+    description: Oracle 대상 DB를 조회하거나 실행계획·제한 실행을 수행하는 서비스 경로는 SQLcl MCP 도구만 사용하고 직접 DB 드라이버 접속을 사용하지 않는다.
+    verify_command: pytest -q tests/test_oracle_mcp_boundary.py
+  - id: ac_agent_routing
+    description: SQL 검증, 후보 탐색, 쿼리 생성, 실행계획 분석, 튜닝 지식, 범위 밖 요청은 각각 담당 Agent로 라우팅되고 general 요청에 supervisor의 직접 응답은 없다.
+    verify_command: pytest -q tests/test_agent_routing.py
+  - id: ac_prompt_module_management
+    description: router, query_planner, sql_validator, candidate_search, plan_risk, explain, knowledge, general 역할의 system prompt가 src/prompts의 독립 모듈에서 import되고 역할 매핑이 검증된다.
+    verify_command: pytest -q tests/test_prompt_modules.py
+  - id: ac_sqlite_memory
+    description: 현재 요청 상태는 checkpoints.sqlite에 저장되고 검증 이력, SQL 버전, 성능 기준선, 비즈니스 용어, 피드백은 memory.sqlite에 영속 저장된다.
+    verify_command: pytest -q tests/test_memory_persistence.py
+  - id: ac_rag_grounded_tuning
+    description: explain_agent와 knowledge_agent는 실행계획 분석과 하이브리드 RAG 튜닝 근거를 결합해 원인, 실행계획 증거, 개선안을 구조화해 반환한다.
+    verify_command: pytest -q tests/test_rag_diagnosis.py
+  - id: ac_guardrails_and_hitl
+    description: 프롬프트 인젝션, 금지 주제, 개인정보 노출을 가드레일로 처리하고, gather_stats 또는 create_index 적용 요청은 승인 전 실행되지 않는다.
+    verify_command: pytest -q tests/test_guardrails_and_hitl.py
+  - id: ac_observability
+    description: 정상 응답에는 요청별 trace 배열이 포함되고 Langfuse가 설정되지 않았거나 실패해도 FileTracer와 API 응답은 동작한다.
+    verify_command: pytest -q tests/test_observability.py
+  - id: ac_evaluation_and_docs
+    description: 기존 positive, edge, negative, guardrail 평가와 후보 검색 fixture를 실행하고, round1과 round2 리포트 및 README·SERVICE 문서가 현재 정책을 설명한다.
+    verify_command: pytest -q tests/test_evaluation_contract.py
+  - id: ac_docker_compose_deployment
+    description: docker compose up --build로 API와 Oracle 대상 DB를 기동할 수 있고, API 헬스체크가 성공한다. Langfuse는 설정된 경우 함께 기동하며 설정되지 않은 경우에도 API는 동작한다.
+    verify_command: docker compose config --quiet
+  - id: ac_demo_frontend
+    description: 웹 UI에서 비즈니스 요구사항 입력, 직접 SQL 검증, 자연어 운영 성능 요청을 각각 시작할 수 있고, 후보 SQL 목록·사용자 선택·accept/revise/reject 결과·실행계획 진단을 표시한다.
+    verify_command: pytest -q tests/test_demo_frontend_contract.py
+  - id: ac_demo_data
+    description: Docker 초기화 데이터는 고객·주문·결제 등 업무 스키마와 서로 구분되는 운영 SQL 후보, 풀스캔·함수 기반 조건·형변환·통계·조인 등 성능 시나리오를 제공한다.
+    verify_command: pytest -q tests/test_demo_data_contract.py
+  - id: ac_submission_contract
+    description: 기존 미니 프로젝트 제출 구조와 FastAPI /query 응답의 answer·contexts·trace 계약을 유지하면서 새 요청 유형과 README·SERVICE·평가 산출물을 일관되게 문서화한다.
+    verify_command: pytest -q tests/test_submission_contract.py
+ontology_schema:
+  name: OracleSqlCopilot
+  description: SQL 생성·사전 검증·운영 성능 개선을 위한 서비스 도메인 모델
+  fields:
+    - name: QueryRequest
+      type: object
+      description: 사용자 요청 유형, 자연어 요구사항 또는 SQL 원문, 세션 식별자
+    - name: ApproverAccess
+      type: object
+      description: 승인책임자 토큰 검증 결과와 마스킹된 감사 식별자. 원문 토큰은 저장하지 않는다
+    - name: AuditEvent
+      type: object
+      description: 승인된 요청의 사용자 식별자, 시각, 작업, 결과와 마스킹 상태
+    - name: MaskingPolicy
+      type: object
+      description: API, UI, LLM, trace, 로그, SQLite 저장소에 공통 적용하는 민감정보·SQL 리터럴 마스킹 규칙
+    - name: PromptModule
+      type: object
+      description: 담당 Agent 역할, src/prompts 모듈 경로, system prompt 버전
+    - name: QueryDraft
+      type: object
+      description: query_planner_agent가 생성한 SELECT 초안과 요구사항 해석·가정
+    - name: QueryCandidate
+      type: object
+      description: 자연어 운영 요청에 대해 SQLcl MCP가 찾은 SQL ID, 마스킹 SQL, 성능 요약, 순위
+    - name: UserSelection
+      type: object
+      description: 사용자가 후보군에서 선택한 SQL ID와 선택 시각
+    - name: QueryReview
+      type: object
+      description: accept, revise, reject 결과와 근거, query_name, reviewed_at, review_id, 승인 주석 SQL
+    - name: ExecutionPlan
+      type: object
+      description: SQLcl MCP로 조회한 예상 또는 실제 실행계획, 계획 해시, 수집 시각
+    - name: RiskAssessment
+      type: object
+      description: 예상 부하 판정, 위험 근거, 제한 실행 허용 여부
+    - name: ExecutionAttempt
+      type: object
+      description: 허용된 제한 실행의 상태와 실제 실행 통계
+    - name: AgentRoute
+      type: object
+      description: 요청 유형과 담당 Agent, 다음 단계
+    - name: Checkpoint
+      type: object
+      description: checkpoints.sqlite에 보존하는 현재 세션의 후보·선택·계획 단계
+    - name: MemoryRecord
+      type: object
+      description: memory.sqlite에 보존하는 검증 이력, SQL 버전, 성능 기준선, 용어, 피드백
+    - name: CandidateFixture
+      type: object
+      description: 자연어 요청, 기대 SQL 식별자, 실제 후보 목록을 보관하는 후보 검색 평가 데이터
+    - name: TuningContext
+      type: object
+      description: RAG 문서 출처, 실행계획 증거, 개선안과 위험 수준
+    - name: ApprovalRequest
+      type: object
+      description: 위험 쓰기 도구의 인자, 승인 상태, 승인 또는 거절 사유
+    - name: TraceEvent
+      type: object
+      description: 요청 단위 에이전트, 도구, 모델 호출의 입력·출력 요약
+    - name: DemoScenario
+      type: object
+      description: UI에서 재현할 입력 유형, 기대 후보 또는 검증 결과, 대상 SQL과 성능 이슈
+evaluation_principles:
+  - name: read_only_safety
+    description: 변경 SQL은 항상 DB 접점 전에 차단하고 실제 실행은 실행계획 위험 평가를 통과한 조회문에 한정한다.
+    weight: 1.0
+  - name: mcp_boundary
+    description: Oracle 대상 DB와의 모든 상호작용은 SQLcl MCP 경계를 통해 일어난다.
+    weight: 1.0
+  - name: user_confirmed_selection
+    description: 자연어 운영 요청의 SQL 후보는 사용자에게 SQL 원문으로 제시되고 선택된 후보만 후속 분석한다.
+    weight: 0.9
+  - name: agent_accountability
+    description: 담당 Agent가 사용자 응답을 만들고 supervisor는 라우팅과 결과 조합만 담당한다.
+    weight: 0.9
+  - name: durable_learning
+    description: 현재 세션 문맥과 세션 간 검증·성능 이력을 SQLite 저장소에서 분리해 관리한다.
+    weight: 0.8
+  - name: grounded_diagnosis
+    description: 성능 개선안은 현재 실행계획 증거와 튜닝 지식 문서 근거를 함께 제시한다.
+    weight: 0.85
+  - name: approval_and_privacy
+    description: 위험 작업은 HITL로 보호하고 승인책임자만 보호 기능을 사용하며 개인정보와 자격증명은 모든 처리·관측·저장 경로에서 마스킹한다.
+    weight: 0.9
+  - name: submission_compatibility
+    description: 기존 미니 프로젝트의 서비스 구조, API 응답 계약, 문서와 평가 보고서 산출물은 새 정책과 충돌하지 않는 범위에서 보존한다.
+    weight: 0.9
+  - name: reproducible_evaluation
+    description: 진단 품질과 후보 검색 품질은 분리된 fixture와 리포트로 재현 가능하게 평가한다.
+    weight: 0.85
+  - name: runnable_deployment
+    description: 로컬 데모와 검증 환경은 Docker Compose 단일 진입점과 문서화된 환경변수로 재현한다.
+    weight: 0.8
+  - name: demonstrable_workflow
+    description: 데모 UI와 초기 데이터는 세 사용자 흐름을 실제로 구분해 보여주고, 후보 선택과 검증 결과를 이해할 수 있게 한다.
+    weight: 0.85
+exit_conditions:
+  - name: all_acceptance_criteria_pass
+    description: SQL 생성, 검증, 후보 탐색, MCP 경계, 라우팅, 기억 저장소 요구사항이 구현되고 검증된다.
+    criteria: 모든 acceptance_criteria의 verify_command가 성공한다.
+  - name: blocked_without_execution
+    description: 변경 SQL 차단 정책이 실제 Oracle 또는 MCP 실행보다 먼저 적용된다.
+    criteria: ac_block_mutating_sql과 ac_plan_risk_gate가 통과한다.
+  - name: candidate_evaluation_complete
+    description: 자연어 운영 요청 후보군 평가가 완료된다.
+    criteria: 모든 CandidateFixture에서 기대 SQL이 시스템이 제시한 후보 목록에 포함된다.
+  - name: existing_capabilities_retained
+    description: 기존 RAG, 가드레일, HITL, 관측성, 평가 기능이 새 SQL 업무 흐름과 함께 유지된다.
+    criteria: ac_rag_grounded_tuning, ac_guardrails_and_hitl, ac_observability, ac_evaluation_and_docs가 통과한다.
+  - name: approver_and_masking_enforced
+    description: 보호된 기능은 승인책임자에게만 제공되고 민감정보가 어느 처리·관측·저장 경로에서도 평문으로 유출되지 않는다.
+    criteria: ac_approver_access_control과 ac_sensitive_data_masking이 통과한다.
+  - name: submission_contract_retained
+    description: 기존 미니 프로젝트 제출 규약과 새 SQL 워크플로우 문서가 함께 충족된다.
+    criteria: ac_submission_contract, ac_evaluation_and_docs, ac_prompt_module_management가 통과한다.
+  - name: compose_deployment_ready
+    description: 신규 환경에서도 API와 Oracle 대상 DB를 일관되게 기동할 수 있다.
+    criteria: ac_docker_compose_deployment이 통과하고 README에 기동·헬스체크·종료·볼륨 초기화 방법이 기록되어 있다.
+  - name: demo_ready
+    description: 신규 사용자가 UI와 Docker 초기 데이터만으로 SQL 생성·검증·운영 진단을 시연할 수 있다.
+    criteria: ac_demo_frontend와 ac_demo_data가 통과하고 README에 각 흐름의 시연 입력 예시가 기록되어 있다.
+metadata:
+  seed_id: seed_b3d33dfe9d1b
+  version: 2.4.0
+  created_at: '2026-09-17T14:08:23.551490Z'
+  refined_at: '2026-09-17T14:08:23.551490Z'
+  ambiguity_score: 0.2
+  interview_id: session-context
+  parent_seed_id: seed_fccf2f0ea546
+  generation_mode: interview-less
+  degraded: false
+  unresolved_slots: []
+  recovery_reason: null
+  qa_advisory:
+    score: 0.62
+    verdict: revise
+    threshold: 0.9
+    note: 기존 Seed의 RAG, 가드레일, HITL, 관측성, 평가·문서·제출 규약을 통합했다. SQL 직접 입력 금지, mock 우선, 직접 Oracle 드라이버 접속처럼 새 정책과 충돌하는 요구사항만 대체했다. 승인책임자 전용 접근, 전 구간 마스킹, 분리된 system prompt 모듈, FileTracer와 Langfuse 병행 관측을 추가했다. 실행 위험 기준값과 MCP 운영 타임아웃 정책은 구현에서 보수적 기본값과 설정값으로 명시한다.

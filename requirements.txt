@@ -1,0 +1,44 @@
+# Oracle SQL 실행계획 성능진단 Agent - 의존성
+# 설치: pip install -r requirements.txt
+# (sds-ax-practice 과정 공유 venv를 쓰는 경우 이미 대부분 설치되어 있음)
+
+python-dotenv
+boto3
+
+# LangChain / LangGraph
+langchain
+langchain-aws
+langchain-classic
+langchain-community
+langchain-text-splitters
+langchain-chroma
+langgraph
+langgraph-checkpoint-sqlite
+langgraph-supervisor
+langchain-mcp-adapters
+
+# RAG
+rank-bm25
+kiwipiepy
+
+# MCP (Oracle SQLcl 연동 확장 경로)
+mcp
+fastmcp
+
+# 실DB 연동 (docker-compose Oracle Free 컨테이너, thin 모드 — 별도 Oracle 클라이언트 불필요)
+oracledb
+
+# API 서버
+fastapi
+uvicorn
+httpx
+
+# Observability (Langfuse, self-hosted via docker-compose)
+langfuse
+
+# 평가 (RAGAS + Bedrock 어댑터)
+ragas
+anthropic[bedrock]
+
+rich
+pytest
