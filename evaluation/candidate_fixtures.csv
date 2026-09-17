@@ -1,0 +1,9 @@
+id,natural_language_query,expected_sql_ids,note
+cf01,주문과 고객을 조인하는 쿼리가 느린데 원인을 알고 싶어,orders_customers_join,고객·주문 조인 키워드 매칭
+cf02,결제 테이블에서 emp_id로 조회하면 왜 느린지 분석해줘,payments_implicit_cast,결제 emp_id 형변환 키워드 매칭
+cf03,PENDING 상태 주문 조회가 너무 오래 걸려. 통계 문제인지 봐줘,orders_stale_stats,PENDING 상태 통계 키워드 매칭
+cf04,orders와 order_items 조인이 너무 느려,orders_order_items_join,주문상세 조인 키워드 매칭
+cf05,해시 조인에서 임시 테이블스페이스 스필이 나는 쿼리 봐줘,orders_customers_hash_tempspc,해시조인 tempspc 키워드 매칭
+cf06,인덱스 레인지 스캔인데 단편화 때문에 비용이 높은 것 같아,orders_index_fragmentation,인덱스 단편화 키워드 매칭
+cf07,region이나 customer_id로 OR 조건 쿼리가 느려,orders_or_condition,OR 조건 region 키워드 매칭
+cf08,고객 조인 쿼리 또는 결제 형변환 쿼리 후보를 찾아줘,orders_customers_join;payments_implicit_cast,복수 카탈로그 키워드 매칭

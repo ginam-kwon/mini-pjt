@@ -50,3 +50,38 @@ class JudgeResult(BaseModel):
     is_correct: bool = Field(description="기대 정답/의도에 부합하는지")
     missing: str = Field(default="", description="빠진 내용")
     reasoning: str = Field(description="채점 근거")
+
+
+class QueryReview(BaseModel):
+    """SQL 사전 검증 결과 — accept/revise/reject + 근거."""
+
+    result: Literal["accept", "revise", "reject"] = Field(
+        description="검증 판정: accept(통과), revise(수정 필요), reject(거부)"
+    )
+    reason: str = Field(description="판정 근거 — 안전성·성능 위험 또는 문제 없음")
+    query_name: str = Field(
+        default="",
+        description="accept 시 쿼리를 식별할 수 있는 짧은 이름(스네이크케이스)",
+    )
+    reviewed_at: str = Field(default="", description="accept 시 ISO-8601 검토 시각")
+    review_id: str = Field(default="", description="accept 시 고유 검증 ID(uuid4)")
+    annotated_sql: str = Field(
+        default="",
+        description="accept 시 query_name/reviewed_at/review_id를 포함한 SQL 주석이 추가된 원본 SQL",
+    )
+
+
+class RiskAssessment(BaseModel):
+    """실행계획 위험도 평가 결과 — 제한 실행 허용 여부 판정."""
+
+    risk_level: Literal["LOW", "MEDIUM", "HIGH"] = Field(
+        description="예상 부하 판정: LOW(허용), MEDIUM(조건부 허용), HIGH(실행 불허)"
+    )
+    reason: str = Field(description="위험 근거 — 실행계획 원문 인용")
+    allow_execution: bool = Field(
+        description="제한 실행 허용 여부 — True이면 gather_plan_statistics로 실제 실행 허가"
+    )
+    recommendation: str = Field(
+        default="",
+        description="개선 권고사항",
+    )

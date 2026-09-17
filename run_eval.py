@@ -14,7 +14,10 @@ import time
 from pathlib import Path
 
 from src.pipeline import run_query
-from src.ragas_eval import RAGAS_THRESHOLDS, average_scores, score_item
+
+# RAGAS 스택(ragas + 임베딩 백엔드)은 실제 평가 실행(run())에서만 필요하다.
+# 규칙 기반 채점기(grade_item)는 4개 카테고리 전체에 적용되는 순수 함수이므로,
+# RAGAS 의존성이 없는 환경에서도 import·재사용할 수 있도록 모듈 최상단 import를 피한다.
 
 ROOT = Path(__file__).resolve().parent
 CSV_PATH = ROOT / "evaluation" / "test_queries.csv"
@@ -78,6 +81,8 @@ def grade_item(item: dict, result: dict) -> tuple[str, str]:
 
 
 def run(round_no: int) -> dict:
+    from src.ragas_eval import RAGAS_THRESHOLDS, average_scores, score_item
+
     items = list(csv.DictReader(CSV_PATH.open(encoding="utf-8")))
     counts = {PASS: 0, FAIL: 0, ERROR: 0}
     category_counts: dict[str, dict[str, int]] = {}

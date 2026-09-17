@@ -60,6 +60,20 @@
 | g04 | guardrail | PASS | 가드레일이 요청을 차단함 |
 | g05 | guardrail | PASS | 가드레일이 요청을 차단함 |
 
+## 후보 검색 Fixture (candidate_fixtures.csv)
+
+자연어 운영 요청에 대해 `candidate_search_agent`가 반환하는 후보 SQL 목록을 검증하는 fixture다.
+`evaluation/candidate_fixtures.csv` 8건(cf01~cf08)으로 구성되며, 각 항목은 `natural_language_query`와
+기대 `expected_sql_ids`를 포함한다. 후보 검색 품질은 이 fixture를 기준으로 기대 SQL ID가
+후보 목록에 포함되는지(recall)로 평가한다.
+
+현재 정책: 세 흐름(SQL 생성·SQL 검증·운영 성능 진단) 모두 승인책임자(`X-Approver-Token`)만 접근 가능하며,
+Oracle 대상 DB는 SQLcl MCP 단일 경로만 사용한다. 민감정보는 모든 처리·관측·저장 경로에서 마스킹된다.
+
+평가 대상 요청 유형: `POST /query`(진단 질문 및 SELECT 직접 입력, 기존 제출 계약 유지), `POST /generate`,
+`POST /validate`, `POST /candidates`, `POST /candidates/diagnose`. 모든 요청 유형이 동일한 응답 계약
+(`answer`·`contexts`·`trace`)을 공유하므로, 규칙기반 채점과 RAGAS 채점 모두 같은 필드를 읽어 수행한다.
+
 ## 알려진 한계
 
 - `faithfulness`가 이 실행에서 N/A로 남았다. 원인은 RAGAS의 instructor 기반 anthropic

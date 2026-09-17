@@ -1,8 +1,13 @@
 # docker-compose.yml
 #
-# 이 프로젝트의 db_tool(src/tools.py)이 조회하는 실제 Oracle DB를 로컬에 한 번에 띄운다.
-# 사용법은 README.md "실DB 셋업" 섹션 참고. FastAPI 앱 자체는 컨테이너화하지 않고
-# (기존 공유 venv를 그대로 쓰기 위해) 로컬에서 실행하며, 이 컨테이너의 DB에 접속한다.
+# 단일 진입점: docker compose up --build
+#   - oracle-db : Oracle Free 23c 대상 DB (항상 기동)
+#   - api        : FastAPI 진단 서비스 (항상 기동, oracle-db 의존)
+#
+# Langfuse 셀프호스팅이 필요하면 --profile langfuse 추가:
+#   docker compose --profile langfuse up --build
+#
+# 비밀값·포트·볼륨은 .env (또는 .env.example 참고) 로 설정한다.
 
 services:
   oracle-db:
@@ -13,7 +18,6 @@ services:
       # 주의: ORACLE_DATABASE를 여기에 "FREEPDB1"로 설정하면 안 된다 — 이미지가 기본으로 이미
       # 만드는 기본 PDB와 이름이 겹쳐 ORA-65012(already exists)가 나고, entrypoint가 "첫 초기화"
       # 분기를 이탈해 /container-entrypoint-initdb.d 커스텀 스크립트를 아예 실행하지 않게 된다.
-      # 기본 PDB 이름은 어차피 FREEPDB1이므로 이 변수는 설정하지 않는다(healthcheck.sh도 동일하게 기본값 사용).
     ports:
       - "${ORACLE_PORT:-1521}:1521"
     volumes:
@@ -28,12 +32,36 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  api:
+    build: .
+    container_name: sql-tuning-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      ORACLE_DSN: ${ORACLE_DSN:-oracle-db:1521/FREEPDB1}
+      ORACLE_APP_USER: ${ORACLE_APP_USER:-appuser}
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD:-AppUser_2026!}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      APPROVER_TOKEN: ${APPROVER_TOKEN:-demo-approver-token}
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   # --- Langfuse 셀프호스팅 (Observability) ---
-  # src/tracing.py의 langfuse_callbacks()가 여기 붙는다. Postgres/ClickHouse/Redis/MinIO는
-  # 호스트에 포트를 노출하지 않는다 — 호스트에 이미 5432(postgres 14, 이 프로젝트와 무관)가 떠
-  # 있어 충돌하며, 어차피 langfuse-web/worker만 컨테이너 네트워크 내부에서 접속하면 된다.
-  # 브라우저에서 열어보는 진입점은 langfuse-web(:3000) 하나뿐이다.
+  # 기본 기동에서는 포함되지 않는다. --profile langfuse 를 추가해야 기동한다.
+  # src/tracing.py의 langfuse_callbacks()는 LANGFUSE_PUBLIC_KEY/SECRET_KEY가 없으면
+  # 빈 리스트를 반환하므로 Langfuse 없이도 API는 정상 동작한다.
   langfuse-postgres:
+    profiles: [langfuse]
     image: postgres:16-alpine
     container_name: langfuse-postgres
     restart: unless-stopped
@@ -50,6 +78,7 @@ services:
       retries: 10
 
   langfuse-clickhouse:
+    profiles: [langfuse]
     image: clickhouse/clickhouse-server
     container_name: langfuse-clickhouse
     restart: unless-stopped
@@ -57,7 +86,7 @@ services:
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?LANGFUSE_CLICKHOUSE_PASSWORD 필요 - .env 참고}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-changeme}
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
@@ -69,10 +98,11 @@ services:
       start_period: 1s
 
   langfuse-redis:
+    profiles: [langfuse]
     image: redis:7-alpine
     container_name: langfuse-redis
     restart: unless-stopped
-    command: --requirepass ${LANGFUSE_REDIS_AUTH:?LANGFUSE_REDIS_AUTH 필요 - .env 참고}
+    command: --requirepass ${LANGFUSE_REDIS_AUTH:-changeme}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -80,6 +110,7 @@ services:
       retries: 10
 
   langfuse-minio:
+    profiles: [langfuse]
     # Docker Hub의 minio/minio는 인증 없이는 pull이 막혀 있다(2025년경 정책 변경) -> quay.io 미러 사용.
     image: quay.io/minio/minio
     container_name: langfuse-minio
@@ -88,7 +119,7 @@ services:
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
       MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:?LANGFUSE_MINIO_ROOT_PASSWORD 필요 - .env 참고}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-changeme}
     volumes:
       - langfuse_minio_data:/data
     healthcheck:
@@ -99,6 +130,7 @@ services:
       start_period: 1s
 
   langfuse-worker:
+    profiles: [langfuse]
     image: langfuse/langfuse-worker:3
     container_name: langfuse-worker
     restart: unless-stopped
@@ -113,35 +145,36 @@ services:
         condition: service_healthy
     environment: &langfuse-worker-env
       DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
-      SALT: ${LANGFUSE_SALT:?LANGFUSE_SALT 필요 - .env 참고}
-      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY 필요 - .env 참고}
+      SALT: ${LANGFUSE_SALT:-changeme_random_hex}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-changeme_64_hex_chars_pad_to_64_chars_with_zeros00}
       TELEMETRY_ENABLED: "false"
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-changeme}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-changeme}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
       LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-changeme}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
       LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
-      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH}
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-changeme}
 
   langfuse-web:
+    profiles: [langfuse]
     image: langfuse/langfuse:3
     container_name: langfuse-web
     restart: unless-stopped
@@ -151,9 +184,7 @@ services:
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?LANGFUSE_NEXTAUTH_SECRET 필요 - .env 참고}
-      # 최초 기동 시 조직/프로젝트/API 키/관리자 계정을 자동 생성 -> UI에서 수동 설정 없이
-      # 바로 src/tracing.py의 LANGFUSE_PUBLIC_KEY/SECRET_KEY로 쓸 수 있다.
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme_random_hex}
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-mini-pjt}
       LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}

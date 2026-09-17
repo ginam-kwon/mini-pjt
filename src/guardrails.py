@@ -12,7 +12,7 @@ from src.schemas import InjectionCheck
 INJECTION_PATTERNS = [
     r"ignore (the |all )?(previous|above|prior) (instructions?|prompts?)",
     r"you are now a different",
-    r"(위의?|이전|기존|지금까지) ?(모든 )?(지시|명령|규칙|프롬프트)[은는를]? ?.{0,8}(무시|잊|버려)",
+    r"(위의?|이전의?|기존|지금까지) ?(모든 )?(지시|명령|규칙|프롬프트)[은는를]? ?.{0,8}(무시|잊|버려)",
     r"규칙 ?(이|가) ?없는 (AI|인공지능|모드)",
     r"system\s*:\s*",
     r"</?(system|admin|root)>",
@@ -67,7 +67,7 @@ def input_guard(text: str) -> tuple[bool, str]:
 # 2) PII/민감정보 마스킹 (SQL 리터럴에 섞여 들어올 수 있는 개인정보/자격증명)
 # ------------------------------------------------------------
 PII_PATTERNS = {
-    "emp_id": r"\bE\d{6}\b",
+    "emp_id": r"(?<![A-Za-z0-9])E\d{6}(?![0-9A-Za-z])",
     "phone": r"01[0-9][-\s]?\d{3,4}[-\s]?\d{4}",
     "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
     "aws_key": r"\bAKIA[0-9A-Z]{16}\b",
@@ -87,6 +87,42 @@ def mask_pii(text: str) -> str:
 
 def is_off_topic(text: str) -> bool:
     return any(t in text for t in FORBIDDEN_TOPICS)
+
+
+def mask_sql_for_external(sql_or_plan: str) -> str:
+    """외부로 나가는 모든 지점(LLM payload, API 응답, trace, 로그, SQLite 저장)에서
+    공통으로 사용하는 마스킹. SQL 리터럴(문자열/숫자)을 :param_N으로, PII 패턴(이메일/전화/사번/AWS
+    키/비밀번호)을 [MASKED_*]로 치환한다. 원본 실행(EXPLAIN PLAN 등)에는 이 함수를 적용한 결과를
+    쓰지 않는다 — 오직 표시/전송/저장용 사본에만 적용한다."""
+    from src.tools import _mask_sql_literals
+
+    return mask_pii(_mask_sql_literals(sql_or_plan))
+
+
+# ------------------------------------------------------------
+# 2-b) 변경 SQL 차단: UPDATE·DELETE 포함 입력은 SQLcl MCP 호출 전에 코드 기반으로 차단
+# ------------------------------------------------------------
+_MUTATING_SQL_RE = re.compile(r"\b(UPDATE|DELETE)\b", re.IGNORECASE)
+
+
+def contains_mutating_sql(sql: str) -> bool:
+    """SQL 텍스트에 UPDATE 또는 DELETE 키워드가 포함되어 있으면 True를 반환한다.
+    컬럼명(update_time, delete_flag)은 word boundary 덕분에 걸리지 않는다."""
+    return bool(_MUTATING_SQL_RE.search(sql))
+
+
+def block_mutating_sql(sql: str) -> dict | None:
+    """UPDATE 또는 DELETE가 포함된 SQL이면 MCP 호출 없이 차단 응답을 반환한다.
+    SQLcl MCP 호출 전에 반드시 이 함수를 먼저 거쳐야 한다. 안전하면 None을 반환한다."""
+    if contains_mutating_sql(sql):
+        return {
+            "status": "blocked",
+            "reason": "[규칙] SELECT 조회문만 입력할 수 있습니다 — UPDATE·DELETE 등 변경 SQL은 허용되지 않습니다.",
+            "answer": "",
+            "contexts": [],
+            "trace": [],
+        }
+    return None
 
 
 # ------------------------------------------------------------

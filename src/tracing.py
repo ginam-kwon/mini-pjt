@@ -13,6 +13,15 @@ from langchain_core.callbacks import BaseCallbackHandler
 TRACE_PATH = "trace.jsonl"
 
 
+def _mask(text: str) -> str:
+    """trace/log 기록 전 PII를 마스킹한다. guardrails 순환참조 없이 lazy import로 처리."""
+    try:
+        from src.guardrails import mask_pii
+        return mask_pii(str(text))
+    except Exception:
+        return str(text)
+
+
 class FileTracer(BaseCallbackHandler):
     """모든 모델/도구 호출을 trace.jsonl 에 JSONL로 기록하고, 동시에 이번 요청의 이벤트를
     메모리에도 쌓아 공식 API 응답의 trace 필드(요청 단위 JSON 배열)를 채울 수 있게 한다."""
@@ -43,11 +52,11 @@ class FileTracer(BaseCallbackHandler):
 
     def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
         self._starts[run_id] = time.time()
-        self._record({"event": "tool_start", "run_id": str(run_id), "tool": serialized.get("name"), "input": input_str[:200]})
+        self._record({"event": "tool_start", "run_id": str(run_id), "tool": serialized.get("name"), "input": _mask(input_str)[:200]})
 
     def on_tool_end(self, output, *, run_id, **kwargs):
         latency = time.time() - self._starts.pop(run_id, time.time())
-        self._record({"event": "tool_end", "run_id": str(run_id), "latency_s": round(latency, 3), "output": str(output)[:200]})
+        self._record({"event": "tool_end", "run_id": str(run_id), "latency_s": round(latency, 3), "output": _mask(output)[:200]})
 
     def on_tool_error(self, error, *, run_id, **kwargs):
         self._record({"event": "tool_error", "run_id": str(run_id), "error": str(error)})
@@ -103,3 +112,15 @@ def langfuse_callbacks() -> list:
         return [CallbackHandler()]
     except Exception:
         return []
+
+
+def observability_callbacks(tracer: FileTracer) -> list:
+    """요청 하나에 붙일 콜백 목록: FileTracer는 항상 유지하고 Langfuse는 부가로만 더한다.
+    Langfuse 조회/생성이 어떤 이유로 예외를 던져도 여기서 삼켜서, 관측 도구 실패가
+    API 요청 자체를 실패시키지 않게 한다(요청 응답의 trace 배열은 FileTracer가 계속 채운다)."""
+    callbacks: list = [tracer]
+    try:
+        callbacks.extend(langfuse_callbacks())
+    except Exception:
+        pass
+    return callbacks
