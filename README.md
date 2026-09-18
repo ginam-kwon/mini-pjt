@@ -3,6 +3,7 @@
 ## 배포 사이트
 
 - [UI](https://sqlmanager.ginam.dev)
+- UI 로그인 User: `sds-ax` PW : `sds-ax`
 - [Langfuse](https://langfuse.ginam.dev)
 - Langfuse 로그인 이메일: `ginami0129n@naver.com` PW : `2oZdr_Xa9mcgDKqK`
 - [Swagger API 문서](https://sqlmanager.ginam.dev/docs)
