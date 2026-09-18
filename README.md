@@ -5,7 +5,7 @@
 - [UI](https://sqlmanager.ginam.dev)
 - [Langfuse](https://langfuse.ginam.dev)
 - Langfuse 로그인 이메일: `ginami0129n@naver.com` PW : `2oZdr_Xa9mcgDKqK`
-- [Swagger API 문서](https://langfuse.ginam.dev/docs)
+- [Swagger API 문서](https://sqlmanager.ginam.dev/docs)
 
 [동작 사진](DEMO.md)
 
