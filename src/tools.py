@@ -368,7 +368,14 @@ def _parse_sql_run_csv(result: object) -> list[dict]:
         return []
     if text.lstrip().startswith("Error") or "SQL Error" in text or "ORA-" in text:
         raise RuntimeError(f"sql_run 도구가 오류를 반환했습니다: {text[:200]!r}")
-    reader = csv.DictReader(io.StringIO(text))
+    # SQLcl은 조회 결과가 0건이면 CSV 헤더 뒤에(또는 헤더도 없이 단독으로) 평문 "no rows
+    # selected" 줄을 낸다 — 에러가 아니라 정상적인 "결과 없음"이다. 걸러내지 않으면 DictReader가
+    # 이 줄을 컴마 없는 한 행으로 삼켜 SQL_ID 컬럼값이 문자열 "no rows selected"인 가짜 데이터
+    # 행을 만들어낸다.
+    lines = [ln for ln in text.splitlines() if ln.strip().lower() != "no rows selected"]
+    if not lines:
+        return []
+    reader = csv.DictReader(io.StringIO("\n".join(lines)))
     rows = []
     for row in reader:
         if None in row:  # 헤더보다 필드가 많은 손상된 행 — 조용히 건너뛴다
@@ -486,15 +493,18 @@ def search_sql_candidates(question: str, top_k: int = 5) -> list[dict]:
 
     candidates = []
     for rank, row in enumerate(rows, start=1):
-        sql_text = _clean_cached_sql_text(row.get("SQL_TEXT", ""))
-        executions = row.get("EXECUTIONS", "0")
-        elapsed_us = row.get("ELAPSED_TIME", "0")
+        # dict.get(key, default)의 default는 키가 없을 때만 쓰인다 — DictReader가 짧은 행에
+        # restval(기본 None)을 채워 넣으면 키는 있고 값이 None인 채로 남아 아래 정규식/float()가
+        # TypeError로 죽는다. 값이 None/누락이면 모두 빈 문자열로 취급한다.
+        sql_text = _clean_cached_sql_text(row.get("SQL_TEXT") or "")
+        executions = row.get("EXECUTIONS") or "0"
+        elapsed_us = row.get("ELAPSED_TIME") or "0"
         try:
             elapsed_secs = float(elapsed_us) / 1_000_000
         except ValueError:
             elapsed_secs = 0.0
         candidates.append({
-            "sql_id": row.get("SQL_ID", ""),
+            "sql_id": row.get("SQL_ID") or "",
             "masked_sql": _mask_sql_literals(sql_text),
             "description": f"실행 {executions}회, 총 소요 {elapsed_secs:.1f}초 (V$SQL 실측)",
             "rank": rank,
@@ -523,7 +533,7 @@ async def _sqlcl_mcp_fetch_live_plan(sql_id: str) -> dict:
         rows = _parse_sql_run_csv(text_result)
         if not rows:
             return {}
-        sql_text = _clean_cached_sql_text(rows[0].get("SQL_TEXT", ""))
+        sql_text = _clean_cached_sql_text(rows[0].get("SQL_TEXT") or "")
         plan_result = await sql_tool.ainvoke({
             "sql": f"SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{sql_id}', NULL, 'ALLSTATS LAST'))"
         })

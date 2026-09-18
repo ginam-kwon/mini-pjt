@@ -38,10 +38,13 @@ from src.common import FALLBACK_MODEL_IDS, REGION, _is_throttling_error, default
 # 실제로 지원하는 max_tokens만 넘어가도록 메서드 자체를 국소적으로 교체한다.
 def _map_provider_params_max_tokens_only(self) -> dict:
     # 기본값 1024는 faithfulness의 NLI 판정 목록(statements 여러 개 + verdict)처럼 긴 JSON
-    # 출력에서 잘려("EOF while parsing a list") InstructorRetryException을 유발했다 — 여유있게 높인다.
+    # 출력에서 잘려("EOF while parsing a list") InstructorRetryException을 유발했다 — 여유있게
+    # 높인다. 4096으로 올렸던 첫 시도도 라우팅 수정 이후 답변이 더 길고 구체적으로 진단하게
+    # 되면서(원인·근거·개선안이 여러 개) NLI 문장 분해 결과가 더 길어져 다시 잘렸다 — 8192로
+    # 더 올린다.
     args = self.model_args
     max_tokens = args.get("max_tokens") if isinstance(args, dict) else getattr(args, "max_tokens", None)
-    return {"max_tokens": max_tokens or 4096}
+    return {"max_tokens": max_tokens or 8192}
 
 
 InstructorLLM._map_provider_params = _map_provider_params_max_tokens_only

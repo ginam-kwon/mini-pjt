@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 from src.actions import CHECKPOINT_DB, build_action_graph
 from src.auth import approver_token_scheme, verify_approver_token, write_audit
 from src.pipeline import (
+    MAX_QUESTION_LEN,
+    MIN_QUESTION_LEN,
     resume_business_requirement,
     run_candidate_diagnose,
     run_feedback,
@@ -134,7 +136,14 @@ async def query(req: QueryRequest, x_approver_token: str | None = Depends(approv
     # 빈 입력은 분류할 의도가 없으므로 Supervisor/LLM을 호출하지 않는다. 기존 /query 계약의
     # 결정적 입력 검증 응답을 그대로 돌려주며, 브라우저가 로딩 상태에 머무르지 않게 한다.
     # 토큰 헤더가 아예 없는 요청도 기존 계약 그대로 legacy run_query로 처리한다.
-    if not req.question.strip() or x_approver_token is None:
+    question = req.question.strip()
+    if not question or x_approver_token is None:
+        return await run_query(question=req.question)
+
+    # 너무 짧거나(예: "x") 너무 긴 질문은 의도를 분류할 수 없다 — Supervisor/LLM 분류로 넘기면
+    # 모델이 그럴싸한 답을 지어낼 위험이 있으므로, 토큰 유무와 무관하게 run_query의 결정적
+    # no_answer 가드를 그대로 태운다(길이 상수는 src/pipeline.py가 SSOT).
+    if len(question) < MIN_QUESTION_LEN or len(question) > MAX_QUESTION_LEN:
         return await run_query(question=req.question)
 
     # 변경/DDL SQL은 결정적 코드 가드레일로 즉시 차단한다(LLM 분류를 거치지 않는다).

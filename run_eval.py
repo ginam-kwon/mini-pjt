@@ -37,14 +37,37 @@ _client = TestClient(app)
 def _call_query(question: str) -> dict:
     """실제 POST /query를 호출한다. 보호 Agent(query_planner/sql_validator/candidate_search)로
     분류될 수도 있는 입력이라 매 요청에 X-Approver-Token을 실어 보낸다 — 공개 Agent로
-    분류되면 토큰은 그냥 무시된다."""
+    분류되면 토큰은 그냥 무시된다.
+
+    응답 mode가 candidate_search면 "N개의 후보 SQL을 찾았습니다"라는 한 줄짜리 답만 돌아온다 —
+    이건 2단계 흐름(탐색 → 사용자가 카드 선택 → 진단)의 1단계일 뿐이라 실제 진단 품질(traits/
+    RAGAS)을 채점할 근거가 없다. 채점을 의미 있게 하려면 최상위 후보로 POST /candidates/diagnose
+    까지 이어서 호출해 실제 진단 응답을 받아야 한다 — 그래서 이어 부른다."""
     resp = _client.post(
         "/query", json={"question": question}, headers={"X-Approver-Token": APPROVER_TOKEN}
     )
     try:
-        return resp.json()
+        result = resp.json()
     except Exception:
         return {"status": "error", "reason": f"HTTP {resp.status_code}: {resp.text[:200]}", "answer": "", "contexts": [], "trace": []}
+
+    if result.get("mode") == "candidate_search" and result.get("status") == "ok":
+        candidates = result.get("candidates") or []
+        top = next((c for c in candidates if c.get("sql_id")), None)
+        if top is None:
+            return result
+        diag_resp = _client.post(
+            "/candidates/diagnose",
+            json={"sql_id": top["sql_id"], "session_id": result.get("session_id", "")},
+            headers={"X-Approver-Token": APPROVER_TOKEN},
+        )
+        try:
+            diag = diag_resp.json()
+        except Exception:
+            return result
+        diag["candidate_search_answer"] = result.get("answer")
+        return diag
+    return result
 
 PASS, FAIL, ERROR = "PASS", "FAIL", "ERROR"
 

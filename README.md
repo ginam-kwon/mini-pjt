@@ -1,5 +1,25 @@
 # 미니 PJT: Oracle SQL Copilot — SQL 생성·검증·운영 성능 진단 Agent
 
+## 배포 사이트
+
+- [UI](https://sqlmanager.ginam.dev)
+- [Langfuse](https://langfuse.ginam.dev)
+- Langfuse 로그인 이메일: `ginami0129n@naver.com` PW : `2oZdr_Xa9mcgDKqK`
+- [Swagger API 문서](https://langfuse.ginam.dev/docs)
+
+[동작 사진](DEMO.md)
+
+## 빠른 설치 및 실행
+
+Langfuse를 포함한 모든 서비스를 시작합니다.
+
+```bash
+cp .env.example .env
+docker compose --profile langfuse up -d --build
+```
+
+실행 상태는 `docker compose ps`, 로그는 `docker compose logs -f`로 확인합니다.
+
 ## 무엇을 푸나
 
 DBA/백엔드 담당자가 반복적으로 하는 업무를 세 가지 흐름으로 자동화한다.
@@ -79,35 +99,155 @@ DB 접점 전에 차단), **실행계획 원문은 절대 사용자에게 입력
 
 ## 아키텍처
 
-```
-POST /query {"question": "..."}
-        │
-   입력검증(빈값/과대입력/비문자열) → InputGuard(차단, 규칙+LLM) → src/guardrails.py
-        │
-   SQLcl MCP 로 대상 SQL·실행계획 조회 (사용자가 SELECT 원문을 준 경우 그 SQL로 진단)  src/tools.py
-        │ (조회 대상이 없으면 knowledge_agent로 순수 지식 질문 처리)
-        │
-   Plan-Execute 그래프  src/plan_execute.py
-     planner → execute(supervisor 위임) → replan → finalize
-                       │
-              create_supervisor([explain_agent, knowledge_agent])   src/agents.py
-                ├─ explain_agent : db_tool이 조회한 SQL/실행계획(데이터로만 취급)을 분석
-                │    · gather_stats/create_index는 write 위험도구 → POST /actions/apply 를 거쳐
-                │      항상 needs_approval() → interrupt() 승인 후 실행  src/actions.py
-                └─ knowledge_agent : 하이브리드 RAG(BM25+Chroma+MultiQuery+LLM 리랭크)  src/retriever.py
-              장기 메모리(InMemoryStore): SQL 지문(fingerprint)별 과거 진단 재사용
-        │
-   최종 LCEL 구조화 출력 SqlPlanAnalysis(summary, root_causes[], improvements[])
-        │
-   OutputCheck(검증) → Logging(기록: agent_log.jsonl, trace.jsonl)
-        │
-   응답 {"answer": str, "contexts": [{"doc_id","text"}], "trace": [{"step","input","output"}]}
+자연어 요청은 (빈 질문·변경/DDL SQL의 결정적 코드 차단을 제외하면) 항상 Multi-Agent Supervisor가
+6개 에이전트(explain/knowledge/query_planner/sql_validator/candidate_search/general) 중 하나로
+위임한다. 보호 Agent가 선택돼도 실제 Tool 호출 전까지는 권한·DB·MCP·SQLite 접근이 없다. SQL 생성은
+먼저 처리 계획을 `awaiting_plan_approval` 상태로 저장하고, 사람이 승인한 뒤에만 스키마 조회·SQL
+생성·실행계획 진단을 재개한다. 아래는 전체 라우팅·에이전트·서브그래프를 하나로 그린 그래프다.
+
+```mermaid
+flowchart TD
+    Q["POST /query<br/>{question, session_id}"]
+    CD["POST /candidates/diagnose [보호]<br/>{sql_id, session_id}"]
+    PA["POST /plans/{session_id}/approve [보호]<br/>{decision, requirement}"]
+    FB["POST /feedback [보호]<br/>{feedback_type, content}"]
+    AA["POST /actions/apply [보호]<br/>{tool, args}"]
+    AP["POST /approve/{approval_id} [보호]<br/>{decision, args}"]
+
+    Q --> QEmpty{"질문이 비어있나?"}
+    QEmpty -- 예 --> RQ1["run_query()<br/>결정적 no_answer"]
+    QEmpty -- 아니오 --> QMut{"UPDATE/DELETE/DROP 등<br/>변경·DDL SQL인가?"}
+    QMut -- 예 --> RQ2["run_query()<br/>코드 가드레일 즉시 차단"]
+    QMut -- 아니오 --> QSql{"SELECT/WITH<br/>원문 그 자체인가?"}
+    QSql -- 예 --> RQ3["run_query()<br/>db_tool 매칭 → 진단그래프"]
+    QSql -- 아니오 --> Sup
+
+    subgraph Sup["Multi-Agent Supervisor — src/agents.py build_supervisor()"]
+        SupNode(("sqlmanager_supervisor<br/>LLM이 요청을 분류"))
+        SupNode --> Explain["explain_agent"]
+        SupNode --> Knowledge["knowledge_agent"]
+        SupNode --> QP["query_planner_agent 🔒"]
+        SupNode --> SV["sql_validator_agent 🔒"]
+        SupNode --> CS["candidate_search_agent 🔒"]
+        SupNode --> General["general_agent"]
+    end
+
+    Explain -->|"SQLcl MCP 도구<br/>(connect/sql_run/schema_information 등)"| MCP[("Oracle 대상 DB<br/>SQLcl MCP")]
+    Knowledge -->|"search_tuning_knowledge"| RAG[("하이브리드 RAG<br/>BM25+Chroma+MultiQuery+리랭크")]
+    General -->|"도구 없음, 자유 응답"| GeneralOut(("범위 밖 안내"))
+
+    QP -->|"generate_sql_draft"| QPGraph
+    SV -->|"validate_user_sql"| SqlVal["run_sql_validation()<br/>review_sql() → accept/revise/reject"]
+    CS -->|"search_operational_candidates"| CandSearch["run_candidate_search()<br/>V$SQL 동적 스캔(SQLcl MCP)"]
+
+    subgraph QPGraph["query_planner 그래프 — build_query_planner_graph()"]
+        direction LR
+        PR["plan_requirement"] --> LS["lookup_schema"] --> DS["draft_sql"] --> VS["validate_sql"] --> RP["review_plan<br/>(위험도 평가 + 진단그래프 호출)"]
+    end
+    RP -.승인 대기: awaiting_plan_approval.-> PA
+    PA --> Resume["resume_business_requirement()"]
+    Resume -->|approve| RunBiz["run_business_requirement()"]
+
+    RQ3 --> Diag
+    CD --> CandDiag["run_candidate_diagnose()"] --> Diag
+    RP --> Diag
+
+    subgraph Diag["진단 Plan-Execute 그래프 — build_diagnosis_graph()"]
+        direction LR
+        Plan["planner<br/>LLM이 2~4단계 계획 수립"] --> Exec["execute<br/>Supervisor 재호출<br/>(explain/knowledge_agent)"] --> Replan["replan"]
+        Replan -- 단계 남음 --> Exec
+        Replan -- 완료 --> Fin["finalize<br/>SqlPlanAnalysis 구조화 출력"]
+    end
+    Diag -.SQL 지문(fingerprint) 캐시.-> Store[("InMemoryStore<br/>장기 메모리")]
+
+    AA --> Act
+    AP --> Act
+    subgraph Act["HITL 승인 그래프 — build_action_graph()"]
+        direction LR
+        Gate["gate<br/>needs_approval() → interrupt()"] --> Run["run<br/>gather_stats / create_index"]
+    end
+
+    FB --> Feedback["run_feedback()<br/>memory.sqlite 저장"]
 ```
 
-자연어 요청은 항상 Multi-Agent Supervisor가 6개 에이전트(explain/knowledge/query_planner/
-sql_validator/candidate_search/general) 중 하나로 위임한다. 보호 Agent가 선택돼도 실제 Tool
-호출 전까지는 권한·DB·MCP·SQLite 접근이 없다. SQL 생성은 먼저 처리 계획을 `awaiting_plan_approval`
-상태로 저장하고, 사람이 승인한 뒤에만 스키마 조회·SQL 생성·실행계획 진단을 재개한다.
+### LangGraph 실행 그래프 (코드에서 추출)
+
+위 다이어그램은 API·에이전트·외부 시스템을 포함한 전체 아키텍처이고, 아래는 최상위
+`sqlmanager_supervisor`의 LangGraph 컴파일 결과다. `get_graph().draw_mermaid()`로 추출했으므로
+실제 라우팅 노드와 엣지를 코드와 대조할 수 있다.
+
+#### 최상위 Supervisor 라우팅 그래프
+
+`src.agents.build_supervisor()`는 `sqlmanager_supervisor` 이름으로 컴파일된다. `supervisor`가
+요청을 여섯 전문 Agent 중 하나에 위임하고, 해당 Agent의 결과는 다시 `supervisor`로 돌아온다.
+완료된 요청만 `__end__`로 향한다. 보호 Agent의 토큰 검사는 이 라우팅 시점이 아니라 전용 도구를
+호출하기 직전에 이뤄진다.
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	supervisor(supervisor)
+	explain_agent(explain_agent)
+	knowledge_agent(knowledge_agent)
+	query_planner_agent(query_planner_agent)
+	sql_validator_agent(sql_validator_agent)
+	candidate_search_agent(candidate_search_agent)
+	general_agent(general_agent)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> supervisor;
+	candidate_search_agent --> supervisor;
+	explain_agent --> supervisor;
+	general_agent --> supervisor;
+	knowledge_agent --> supervisor;
+	query_planner_agent --> supervisor;
+	sql_validator_agent --> supervisor;
+	supervisor -.-> __end__;
+	supervisor -.-> candidate_search_agent;
+	supervisor -.-> explain_agent;
+	supervisor -.-> general_agent;
+	supervisor -.-> knowledge_agent;
+	supervisor -.-> query_planner_agent;
+	supervisor -.-> sql_validator_agent;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+### Agent 설명 (src/agents.py)
+
+| Agent | 담당 | 도구 | 보호 |
+|---|---|---|---|
+| `explain_agent` | 자연어 진단 질문의 실행계획 연산자·비용·조건 문제를 분석 | SQLcl MCP 전체 도구(`_oracle_tools()`) | 아니오 |
+| `knowledge_agent` | Oracle SQL 튜닝 이론·개선 패턴 지식 질문에 답변 | `search_tuning_knowledge`(하이브리드 RAG) | 아니오 |
+| `query_planner_agent` | 비즈니스 요구사항을 SELECT SQL로 설계 — 처리 계획 제시 후 사람 승인 필요 | `generate_sql_draft` | 예 |
+| `sql_validator_agent` | 사용자가 입력한 SELECT/WITH를 accept/revise/reject로 판정 | `validate_user_sql` | 예 |
+| `candidate_search_agent` | 자연어 운영 성능 요청에서 마스킹된 SQL 후보 목록 탐색 | `search_operational_candidates` | 예 |
+| `general_agent` | 위 다섯 범주에 해당하지 않는 요청(범위 밖 질문, 인사 등) | 없음(자유 응답) | 아니오 |
+
+"보호"인 세 Agent는 Supervisor가 위임을 결정하는 시점이 아니라, 각자의 전용 도구가 **실제로
+호출되는 순간** `X-Approver-Token`을 검사한다(`src/agents.py`의 `_protected_access_result()`) —
+그래서 Supervisor 자체는 인증 여부와 무관하게 항상 응답하고, 401/403은 그 안쪽에서만 발생한다.
+
+### 도구 설명 (src/tools.py, src/retriever.py, src/validator.py)
+
+| 도구 | 위치 | 역할 |
+|---|---|---|
+| SQLcl MCP 도구(`connect`/`sql_run`/`schema_information` 등 9개) | `src/tools.py`(`get_oracle_mcp_tools`) | Oracle 대상 DB와의 유일한 상호작용 경계 — 스키마 조회, SQL 실행, 실행계획(`DBMS_XPLAN`) 조회 |
+| `db_tool` | `src/tools.py` | `run_query`의 진단 전용 매칭 — 자연어 질문을 대표 운영 SQL 카탈로그(또는 실DB)와 매칭해 SQL·실행계획을 가져옴 |
+| `search_sql_candidates` | `src/tools.py` | `candidate_search_agent`가 호출하는 실제 구현 — Oracle `V$SQL` 공유 풀을 동적 스캔(웜업된 대표 쿼리 + 캐시된 다른 쿼리 포함), 실패 시 고정 카탈로그로 폴백 |
+| `search_tuning_knowledge` | `src/retriever.py` | 하이브리드 RAG(BM25 + Chroma 벡터검색 + MultiQuery 확장 + LLM 리랭크)로 Oracle 튜닝 지식베이스 문서 검색 |
+| `review_sql` | `src/validator.py` | `sql_validator_agent`가 호출하는 실제 구현 — 입력 SELECT를 accept/revise/reject로 판정하고 주석이 달린 SQL을 생성 |
+| `gather_stats` | `src/tools.py` | (위험: write, 항상 mock) `DBMS_STATS.GATHER_TABLE_STATS` — HITL 승인 없이는 절대 호출되지 않음 |
+| `create_index` | `src/tools.py` | (위험: write, 항상 mock) 인덱스 생성 DDL 실행 — HITL 승인 없이는 절대 호출되지 않음 |
+
+`gather_stats`/`create_index`는 실DB 연동 이후에도 의도적으로 mock 그대로다 — 개선안은 advisory만
+제공한다는 SERVICE.md 정책 때문이며, `POST /actions/apply`를 거쳐도 `gate` 노드의 `interrupt()`
+승인을 통과해야만(그래도 실행 자체는 mock) `run` 노드에 도달한다.
 
 ## API 계약 (제출 규약 유지)
 
@@ -146,7 +286,7 @@ SQL 생성·검증·후보 탐색·후보 진단도 같은 응답 계약을 공�
 cd /home/ubuntu/edu/AX/sds-ax-practice/mini-pjt
 cp .env.example .env   # 필요하면 비밀번호/포트 수정 (기본값 그대로도 동작함)
 
-docker compose up -d   # gvenzl/oracle-free 컨테이너 기동
+docker compose --profile langfuse up -d --build   # API·Oracle·Langfuse 전체 기동
 # 최초 기동 시 db/init/01_setup_schema_and_data.sql이 1회 자동 실행되어
 # customers/orders/order_items/payments 스키마와 7가지 성능 이슈 패턴용 데이터를 적재한다
 # (수 분 소요). 아래로 진행 상황 확인:
@@ -156,7 +296,8 @@ docker compose logs -f oracle-db
 docker inspect -f '{{.State.Health.Status}}' sql-tuning-oracle
 ```
 
-컨테이너를 완전히 초기화(볼륨 삭제 후 데이터 재적재)하려면 `docker compose down -v && docker compose up -d`.
+컨테이너를 완전히 초기화(볼륨 삭제 후 데이터 재적재)하려면
+`docker compose --profile langfuse down -v && docker compose --profile langfuse up -d --build`.
 
 ### SQLcl MCP 연결 저장 (최초 1회, 호스트에서)
 
@@ -191,7 +332,7 @@ SQL> exit
 
 ```bash
 cd /home/ubuntu/edu/AX/sds-ax-practice/mini-pjt
-docker compose up -d langfuse-postgres langfuse-clickhouse langfuse-redis langfuse-minio langfuse-worker langfuse-web
+docker compose --profile langfuse up -d --build
 # 헬스체크
 curl -s http://localhost:3000/api/public/health   # {"status":"OK",...}
 ```

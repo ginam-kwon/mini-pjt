@@ -19,7 +19,7 @@ load_dotenv()  # 이 프로젝트 로컬 .env (Oracle 접속 정보 등)
 # override=False(기본값)라 이미 설정된 키는 덮어쓰지 않으므로, 부족한 키(AWS_*)만 보충된다.
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
-MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
 REGION = "us-east-1"
 
@@ -32,11 +32,6 @@ REGION = "us-east-1"
 # `OutputParserException: Unknown tool type: 'RelevanceScore'`로 깨짐 — 쓰로틀링이 아닌
 # 오류라 폴백 체인이 넘어가지 않고 그대로 실패해 원복함.)
 FALLBACK_MODEL_IDS: list[str] = [
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "us.anthropic.claude-sonnet-4-6",
-    "global.anthropic.claude-sonnet-4-6",
-    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "us.amazon.nova-pro-v1:0",
     "us.amazon.nova-2-lite-v1:0",
@@ -44,25 +39,32 @@ FALLBACK_MODEL_IDS: list[str] = [
     "us.amazon.nova-lite-v1:0",
 ]
 
-
 def _is_throttling_error(e: Exception) -> bool:
-    """botocore ThrottlingException(계정 일일 토큰 한도 등)인지 확인한다. 이 경우에만
-    다음 모델로 넘어간다 — 그 외 오류(잘못된 프롬프트 등)는 모델을 바꿔도 소용없으므로 그대로 올린다.
+    """botocore ThrottlingException(계정 일일 토큰 한도 등)이거나 ServiceUnavailableException
+    (Bedrock 쪽 일시적 503)인지 확인한다. 이 경우에만 다음 모델로 넘어간다 — 그 외 오류(잘못된
+    프롬프트 등)는 모델을 바꿔도 소용없으므로 그대로 올린다.
 
     e.response는 호출 경로에 따라 모양이 다르다 — botocore 예외는 dict 스타일
     (.get("Error", {})...), anthropic SDK(AsyncAnthropicBedrock 등)의 APIStatusError는
     httpx.Response 객체(.status_code)를 준다. 둘 다 안전하게 다룬다."""
     response = getattr(e, "response", None)
-    if isinstance(response, dict) and response.get("Error", {}).get("Code") == "ThrottlingException":
-        return True
+    if isinstance(response, dict):
+        error_code = response.get("Error", {}).get("Code")
+        if error_code in ("ThrottlingException", "ServiceUnavailableException"):
+            return True
     status_code = getattr(response, "status_code", None) or getattr(e, "status_code", None)
-    if status_code == 429:
+    if status_code in (429, 503):
         return True
     if "ReadTimeoutError" in type(e).__name__ or "ConnectTimeoutError" in type(e).__name__:
         # 쓰로틀링으로 처리 지연이 길어지면 우리가 건 30초 timeout에 먼저 걸릴 수 있다 —
         # 같은 모델을 그대로 재시도해봐야 소용없으니 다음 모델로 넘어간다.
         return True
-    return "ThrottlingException" in str(e) or "Too many tokens" in str(e) or "rate_limit" in str(e).lower()
+    return (
+        "ThrottlingException" in str(e)
+        or "ServiceUnavailableException" in str(e)
+        or "Too many tokens" in str(e)
+        or "rate_limit" in str(e).lower()
+    )
 
 
 class MultiModelChatBedrockConverse(ChatBedrockConverse):

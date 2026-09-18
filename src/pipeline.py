@@ -54,6 +54,25 @@ def _masked_context_text(sql: str, execution_plan: str) -> str:
     return f"SQL:\n{mask_sql_for_external(sql)}\n\n실행계획:\n{mask_pii(execution_plan)}"
 
 
+def _tool_message_contexts(messages) -> list[dict]:
+    """explain_agent(SQLcl MCP)/knowledge_agent(RAG)가 호출한 도구의 원문 응답을 RAGAS
+    retrieved_contexts로 노출한다. run_via_supervisor의 knowledge 모드 폴백은 구조화된
+    결과가 없어 지금까지 contexts가 항상 []였다 — RAGAS(answer_relevancy 등)가 먹을 컨텍스트가
+    전혀 없어 채점이 전부 N/A로 빠지는 원인이었다. 외부로 나가는 텍스트라 마스킹을 거친다."""
+    from langchain_core.messages import ToolMessage
+
+    contexts = []
+    for m in messages:
+        if not isinstance(m, ToolMessage):
+            continue
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        content = content.strip()
+        if not content:
+            continue
+        contexts.append({"doc_id": getattr(m, "name", None) or "tool", "text": mask_sql_for_external(content)})
+    return contexts
+
+
 def _save_diagnosis_memory(sql: str, execution_plan: str) -> None:
     """진단 1건의 성능 기준선을 memory.sqlite에 저장한다(AC: SQLite 장기 메모리).
     저장 실패가 진단 응답 자체를 실패시키면 안 되므로 예외는 삼킨다."""
@@ -121,7 +140,7 @@ async def run_via_supervisor(
             "status": "ok",
             "mode": "knowledge",
             "answer": last_nonempty_text(result["messages"]),
-            "contexts": [],
+            "contexts": _tool_message_contexts(result["messages"]),
             "trace": tracer.api_trace(),
         }
     except Exception as e:
@@ -278,7 +297,7 @@ async def run_query(question: str = "") -> dict:
             "status": "ok",
             "mode": "knowledge",
             "answer": last_nonempty_text(result["messages"]),
-            "contexts": [],
+            "contexts": _tool_message_contexts(result["messages"]),
             "trace": tracer.api_trace(),
         }
     except Exception as e:
