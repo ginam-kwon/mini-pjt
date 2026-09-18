@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oracle SQL Copilot</title>
 <style>
+  /* Hallmark · pre-emit critique: P4 H4 E4 S4 R4 V4 */
   :root {
     --bg: #0f1420; --panel: #171e2e; --panel-2: #1e273b; --border: #2a3552;
     --text: #e6ebf5; --muted: #8a95ad; --accent: #5b8cff;
@@ -32,17 +33,7 @@
   }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 
-  /* tabs */
-  .tabs { display: flex; gap: 4px; padding: 12px 16px 0; border-bottom: 1px solid var(--border); }
-  .tab {
-    background: transparent; border: 1px solid var(--border); border-bottom: none;
-    color: var(--muted); border-radius: 6px 6px 0 0; padding: 8px 16px; font-size: 13px;
-    cursor: pointer; font-weight: 500;
-  }
-  .tab.active { background: var(--panel); color: var(--text); border-color: var(--border); }
-  .tab:hover:not(.active) { color: var(--text); }
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
+  .main { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 
   /* token input */
   .token-bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -73,8 +64,10 @@
   button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 4px 10px; font-size: 12px; }
   button.select-btn { background: var(--panel-2); border: 1px solid var(--accent); color: var(--accent); font-size: 12px; padding: 4px 10px; border-radius: 6px; }
   button.select-btn:hover { background: var(--accent); color: white; }
+  .thread-heading { padding: 10px 16px 0; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 
-  #thread { padding: 4px 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+  #thread { padding: 4px 16px 24px; display: flex; flex-direction: column; gap: 24px; }
+  .turn { display: flex; flex-direction: column; gap: 16px; }
   .msg-user {
     align-self: flex-end; background: var(--accent); color: white;
     padding: 10px 14px; border-radius: 12px 12px 2px 12px; max-width: 80%; font-size: 14px;
@@ -85,6 +78,7 @@
   }
   .badges { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
   .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.intent { color: var(--accent); border-color: var(--accent); }
   .badge.ok { color: var(--green); border-color: var(--green); }
   .badge.blocked, .badge.error { color: var(--red); border-color: var(--red); }
   .badge.no_answer { color: var(--amber); border-color: var(--amber); }
@@ -134,9 +128,6 @@
     width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 6px 8px; font-size: 13px;
   }
-  .hitl-empty { color: var(--muted); font-size: 12.5px; }
-  .hitl-approval { border: 1px solid var(--amber); border-radius: 8px; padding: 10px; margin-top: 10px; font-size: 12.5px; }
-  .hitl-result { border: 1px solid var(--green); border-radius: 8px; padding: 10px; margin-top: 10px; font-size: 12.5px; }
   .row { display: flex; gap: 6px; margin-top: 8px; }
   .spinner {
     width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.4); border-top-color: white;
@@ -147,88 +138,103 @@
   .step-list { list-style: none; padding: 0; margin: 0; }
   .step-list li { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; font-size: 13px; }
   .step-list li::before { content: "✓"; color: var(--green); font-size: 12px; margin-top: 1px; }
+
+  /* Operational workspace refresh */
+  :root {
+    --surface: #e6eaf1; --paper: #f4f6f9; --ink: #172033; --ink-soft: #667085;
+    --line: #cfd6e1; --navy: #16213a; --blue: #2563eb; --blue-wash: #e1ebff;
+    --success-wash: #ecfdf3; --warning-wash: #fffaeb; --danger-wash: #fef3f2;
+    --shadow: 0 14px 36px rgba(16, 24, 40, .08); --font-ui: Inter, Pretendard, "Apple SD Gothic Neo", sans-serif;
+  }
+  html, body { min-height: 100%; overflow-x: clip; }
+  body { background: var(--surface); color: var(--ink); font-family: var(--font-ui); }
+  header { max-width: 1240px; margin: 0 auto; padding: 22px 28px; border: 0; }
+  header h1 { color: var(--navy); font-size: 20px; letter-spacing: -.03em; }
+  header h1::before { content: "SQL"; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 22px; margin-right: 9px; border-radius: 5px; background: var(--navy); color: var(--paper); font-size: 9px; letter-spacing: .08em; vertical-align: 2px; }
+  header .sub { color: var(--ink-soft); }
+  #health-dot { box-shadow: 0 0 0 4px var(--success-wash); }
+  .layout { display: block; max-width: 1240px; padding: 0 28px 42px; }
+  .main { overflow: visible; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+  .token-bar { gap: 12px; padding: 13px 20px; border-bottom: 1px solid var(--line); background: #e9edf4; border-radius: 18px 18px 0 0; }
+  .token-bar label { color: var(--navy); font-weight: 700; font-size: 12px; }
+  .token-bar input { max-width: 250px; min-height: 32px; border-color: var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; }
+  .token-bar .hint { color: var(--ink-soft); }
+  .chips { gap: 7px; padding: 18px 20px 4px; }
+  .chip { background: var(--paper); color: var(--ink-soft); border-color: var(--line); padding: 7px 12px; transition: border-color .15s, background .15s, color .15s; }
+  .chip:hover { border-color: var(--blue); background: var(--blue-wash); color: var(--blue); }
+  .composer { align-items: stretch; gap: 10px; padding: 14px 20px 12px; }
+  textarea { min-height: 58px; padding: 15px; background: #ebeff5; color: var(--ink); border-color: var(--line); border-radius: 10px; line-height: 1.5; }
+  textarea:focus { outline: 3px solid var(--blue-wash); border-color: var(--blue); }
+  button { min-height: 42px; background: var(--navy); border-radius: 9px; padding: 0 16px; transition: transform .15s, background .15s; white-space: nowrap; }
+  button:hover:not(:disabled) { background: var(--blue); transform: translateY(-1px); }
+  button:focus-visible, .chip:focus-visible { outline: 3px solid var(--blue-wash); outline-offset: 2px; }
+  button.secondary { background: #dce3ed; color: var(--navy); border-color: #c4cedc; }
+  button.secondary:hover:not(:disabled) { background: #cdd7e5; color: var(--navy); }
+  button.ghost { min-height: 34px; margin-top: 10px; padding: 0 12px; background: #dce8ff !important; border: 1px solid #9db9f2 !important; color: #123b86 !important; font-size: 13px; font-weight: 700; opacity: 1; }
+  button.ghost:hover:not(:disabled) { background: #c9dbff !important; color: #102f69 !important; }
+  .thread-heading { margin: 0 20px; padding: 11px 0 16px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 11px; letter-spacing: .02em; text-transform: none; }
+  #thread { padding: 10px 20px 32px; gap: 26px; }
+  .msg-user { background: var(--navy); border-radius: 14px 14px 3px 14px; box-shadow: 0 4px 12px rgba(22,33,58,.16); }
+  .card { max-width: 100%; padding: 20px; background: var(--paper); border-color: var(--line); border-radius: 13px; box-shadow: 0 2px 5px rgba(16,24,40,.03); }
+  .badge { border-color: var(--line); background: #e9edf4; font-weight: 700; letter-spacing: .02em; }
+  .badge.ok, .badge.accept { color: #027a48; border-color: #abefc6; background: var(--success-wash); }
+  .badge.blocked, .badge.error, .badge.reject { color: #b42318; border-color: #fecdca; background: var(--danger-wash); }
+  .badge.no_answer, .badge.medium, .badge.write, .badge.revise { color: #b54708; border-color: #fedf89; background: var(--warning-wash); }
+  .answer { color: var(--ink); line-height: 1.7; }
+  .section-title { color: var(--ink-soft); font-weight: 700; letter-spacing: .08em; }
+  .rc, .imp, .candidate-card { border-color: var(--line); background: #e9edf4; border-radius: 10px; padding: 13px 14px; }
+  .spinner { border-color: #c4cedc; border-top-color: var(--blue); }
+  .rc .cause, .imp .rec { color: var(--navy); }
+  .rc .evidence, .imp .meta, .candidate-desc { color: var(--ink-soft); }
+  .candidate-card.selected { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-wash); }
+  .candidate-id { color: var(--blue); }
+  pre { background: #101828; border: 0; color: #e4e7ec; border-radius: 9px; padding: 14px; }
+  summary { color: var(--ink-soft); }
+  .trace-step { border-color: var(--line); }
+  .trace-step .step { color: var(--blue); }
+  @media (max-width: 680px) {
+    header { padding: 18px 16px; gap: 7px; }
+    header .sub[style] { width: 100%; margin-left: 0 !important; }
+    .layout { padding: 0 12px 24px; }
+    .token-bar { align-items: flex-start; flex-wrap: wrap; padding: 13px 14px; }
+    .token-bar input { max-width: none; width: 100%; }
+    .composer { flex-wrap: wrap; padding: 12px 14px; }
+    textarea { width: 100%; flex-basis: 100%; }
+    .composer button { flex: 1; }
+    .chips, #thread { padding-left: 14px; padding-right: 14px; }
+    .thread-heading { margin: 0 14px; }
+    .card { padding: 15px; }
+    .msg-user { max-width: 94%; }
+  }
 </style>
 </head>
 <body>
 
 <header>
   <h1>Oracle SQL Copilot</h1>
-  <span class="sub">SQL 생성 · SQL 검증 · 운영 SQL 탐색</span>
+  <span class="sub">무엇이든 하나의 입력창에 물어보세요 — SQL 생성 · SQL 검증 · 운영 SQL 탐색·진단을 서버가 알아서 판단합니다</span>
   <span class="sub" style="margin-left:auto"><span id="health-dot"></span><span id="health-text">서버 확인 중…</span></span>
 </header>
 
-<!-- 승인책임자 토큰 입력 (보호된 세 흐름) -->
-<div class="token-bar">
-  <label>X-Approver-Token</label>
-  <input id="approver-token" type="password" placeholder="승인책임자 토큰 (.env의 APPROVER_TOKEN)" value="demo-approver-token">
-  <span class="hint">SQL 생성·검증·운영 탐색은 유효한 토큰이 필요합니다</span>
-</div>
-
-<div class="tabs">
-  <button class="tab active" data-tab="generate">SQL 생성</button>
-  <button class="tab" data-tab="validate">SQL 검증</button>
-  <button class="tab" data-tab="candidates">운영 SQL 탐색</button>
-  <button class="tab" data-tab="diagnosis">실행계획 진단</button>
-</div>
-
-<!-- ① SQL 생성 탭 -->
-<div class="tab-panel active" id="tab-generate">
-  <div class="chips" id="chips-generate"></div>
-  <div class="composer">
-    <textarea id="req-generate" placeholder="예: 2026년 9월 기준 고객별 주문 총액과 건수를 조회하는 쿼리가 필요합니다"></textarea>
-    <button id="send-generate">생성</button>
-  </div>
-  <div id="thread-generate" class="thread" style="padding:4px 16px 24px;display:flex;flex-direction:column;gap:16px;"></div>
-</div>
-
-<!-- ② SQL 검증 탭 -->
-<div class="tab-panel" id="tab-validate">
-  <div class="chips" id="chips-validate"></div>
-  <div class="composer">
-    <textarea id="req-validate" placeholder="검증할 SELECT 쿼리를 입력하세요&#10;예: SELECT * FROM orders WHERE status = 'PENDING'"></textarea>
-    <button id="send-validate">검증</button>
-  </div>
-  <div id="thread-validate" class="thread" style="padding:4px 16px 24px;display:flex;flex-direction:column;gap:16px;"></div>
-</div>
-
-<!-- ③ 운영 SQL 탐색 탭 -->
-<div class="tab-panel" id="tab-candidates">
-  <div class="chips" id="chips-candidates"></div>
-  <div class="composer">
-    <textarea id="req-candidates" placeholder="예: 주문과 고객 조인 쿼리가 느린 것을 찾고 싶어요"></textarea>
-    <button id="send-candidates">탐색</button>
-  </div>
-  <div id="thread-candidates" class="thread" style="padding:4px 16px 24px;display:flex;flex-direction:column;gap:16px;"></div>
-</div>
-
-<!-- ④ 실행계획 진단 탭 (기존 /query 경로) -->
-<div class="tab-panel" id="tab-diagnosis">
-  <div class="chips" id="chips-diagnosis"></div>
-  <div class="composer">
-    <textarea id="req-diagnosis" placeholder="예: 주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘"></textarea>
-    <button id="send-diagnosis">진단</button>
-  </div>
-  <div id="thread-diagnosis" class="thread" style="padding:4px 16px 24px;display:flex;flex-direction:column;gap:16px;"></div>
-</div>
-
 <div class="layout">
-  <div style="display:none"></div>
-  <aside>
-    <h2>⚠️ 위험 작업 실행 (HITL)</h2>
-    <div id="hitl-body">
-      <p class="hitl-empty">개선안 카드의 "실행 요청" 버튼을 누르거나, 아래에서 직접 도구를 선택해 위험 작업(쓰기)을 요청할 수 있습니다. 모든 요청은 사람 승인을 거쳐야 실행됩니다.</p>
-      <label>도구</label>
-      <select id="hitl-tool">
-        <option value="gather_stats">gather_stats (통계 재수집)</option>
-        <option value="create_index">create_index (인덱스 생성)</option>
-      </select>
-      <div id="hitl-args"></div>
-      <div class="row">
-        <button id="hitl-submit" style="flex:1">요청 보내기</button>
-      </div>
-      <div id="hitl-flow"></div>
+  <div class="main">
+    <!-- 승인책임자 토큰 입력 (보호된 흐름에서만 서버가 검사) -->
+    <div class="token-bar">
+      <label>X-Approver-Token</label>
+      <input id="approver-token" type="password" placeholder="승인책임자 토큰 (.env의 APPROVER_TOKEN)" value="demo-approver-token">
+      <span class="hint">SQL 생성·검증·운영 탐색으로 판단되면 유효한 토큰이 필요합니다. 일반 진단·지식 질문은 토큰 없이 동작합니다</span>
     </div>
-  </aside>
+
+    <div class="chips" id="chips"></div>
+    <div class="composer">
+      <textarea id="req-input" placeholder="예: 주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘 / SELECT 문 / 필요한 요구사항 등 무엇이든 입력하세요"></textarea>
+      <button id="send-btn">보내기</button>
+      <button id="diagnose-btn" class="secondary">실행계획 진단</button>
+    </div>
+    <div class="thread-heading">"실행계획 진단"은 입력을 SQL로 보고 토큰 없이 바로 실행계획 기반 진단을 요청합니다(기존 /query 경로) · 최신 요청이 위에 표시됩니다</div>
+    <div id="thread"></div>
+  </div>
+
 </div>
 
 <script>
@@ -243,6 +249,8 @@ function approverToken() {
   return $("#approver-token").value.trim();
 }
 
+let sessionId = "";
+
 async function postJSON(url, body, withToken=false) {
   const headers = {"content-type": "application/json"};
   if (withToken) {
@@ -254,7 +262,7 @@ async function postJSON(url, body, withToken=false) {
     body: JSON.stringify(body),
   });
   const raw = await res.text();
-  if (res.status === 401) throw Object.assign(new Error("X-Approver-Token 헤더가 필요합니다 (401)"), {raw});
+  if (res.status === 401) throw Object.assign(new Error("이 보호된 요청에는 X-Approver-Token 헤더가 필요합니다 (401)"), {raw});
   if (res.status === 403) throw Object.assign(new Error("유효하지 않은 X-Approver-Token입니다 (403)"), {raw});
   try {
     return JSON.parse(raw);
@@ -280,97 +288,113 @@ async function checkHealth() {
 }
 checkHealth();
 
-// ---------- tab switching ----------
-$$(".tab").forEach(tab => {
-  tab.onclick = () => {
-    $$(".tab").forEach(t => t.classList.remove("active"));
-    $$(".tab-panel").forEach(p => p.classList.remove("active"));
-    tab.classList.add("active");
-    $(`#tab-${tab.dataset.tab}`).classList.add("active");
-  };
+// ---------- example chips (네 가지 흐름을 한 입력창에서 모두 시연) ----------
+const EXAMPLES = [
+  "2026년 9월 기준 고객별 주문 총액과 건수를 조회하는 쿼리가 필요합니다",
+  "이 SQL 검증해줘 SELECT customer_id FROM orders",
+  "SELECT o.order_id, c.customer_name FROM orders o, customers c WHERE o.customer_id = c.customer_id",
+  "주문과 고객 조인 쿼리가 느린 것을 찾고 싶어요",
+  "결제 내역을 emp_id로 조회하는 쿼리가 느려요",
+  "풀 테이블 스캔은 왜 성능에 나쁜 영향을 주나요? (지식 질문)",
+  "UPDATE orders SET status='DONE' WHERE order_id=1",
+];
+
+const chipsEl = $("#chips");
+EXAMPLES.forEach(q => {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = q;
+  b.onclick = () => { $("#req-input").value = q; $("#req-input").focus(); };
+  chipsEl.appendChild(b);
 });
 
-// ---------- example chips ----------
-const EXAMPLES = {
-  generate: [
-    "2026년 9월 기준 고객별 주문 총액과 건수를 조회하는 쿼리가 필요합니다",
-    "결제 테이블에서 직원별 총 결제금액을 집계하는 SELECT를 만들어 주세요",
-    "orders와 customers를 조인해 최근 7일 주문 내역을 보여주는 쿼리",
-  ],
-  validate: [
-    "SELECT * FROM orders WHERE status = 'PENDING'",
-    "SELECT o.order_id, c.customer_name FROM orders o, customers c WHERE o.customer_id = c.customer_id",
-    "UPDATE orders SET status='DONE' WHERE order_id=1",
-  ],
-  candidates: [
-    "주문과 고객 조인 쿼리가 느린 것을 찾고 싶어요",
-    "결제 테이블 emp_id 조회가 느려서 개선하고 싶어요",
-    "주문 상태 PENDING 조회가 느린 원인을 찾아주세요",
-  ],
-  diagnosis: [
-    "주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘",
-    "결제 내역을 emp_id로 조회하는 쿼리가 느려요",
-    "풀 테이블 스캔은 왜 성능에 나쁜 영향을 주나요? (지식 질문)",
-  ],
+// ---------- mode → 한글 라벨 (흐름 구분 표시) ----------
+const MODE_LABELS = {
+  business_requirement: "SQL 생성",
+  sql_validation: "SQL 검증",
+  candidate_search: "운영 SQL 탐색",
+  candidate_diagnose: "실행계획 진단",
+  diagnosis: "실행계획 진단",
+  knowledge: "지식 질문",
 };
 
-Object.entries(EXAMPLES).forEach(([key, examples]) => {
-  const chipsEl = $(`#chips-${key}`);
-  if (!chipsEl) return;
-  examples.forEach(q => {
-    const b = document.createElement("button");
-    b.className = "chip"; b.textContent = q;
-    b.onclick = () => {
-      $(`#req-${key}`).value = q;
-      $(`#req-${key}`).focus();
-    };
-    chipsEl.appendChild(b);
-  });
-});
-
-// ---------- generic send helper ----------
-function makeSendHandler(inputId, buttonId, threadId, url, bodyFn, renderFn, withToken=true) {
-  const inputEl = $(inputId);
-  const btn = $(buttonId);
-  const thread = $(threadId);
-
-  async function doSend() {
-    const q = inputEl.value.trim();
-    if (!q) return;
-    inputEl.value = "";
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>';
-
-    const userBubble = document.createElement("div");
-    userBubble.className = "msg-user";
-    userBubble.textContent = q;
-    thread.appendChild(userBubble);
-
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = '<span class="spinner"></span> 처리 중…';
-    thread.appendChild(card);
-    card.scrollIntoView({behavior: "smooth", block: "end"});
-
-    try {
-      const data = await postJSON(url, bodyFn(q), withToken);
-      renderFn(card, data);
-    } catch (e) {
-      card.innerHTML = `<div class="badges"><span class="badge error">error</span></div>
-        <div class="answer">${escapeHtml(e.message)}</div>
-        ${e.raw ? `<details><summary>원본 응답 보기</summary><pre>${escapeHtml(e.raw)}</pre></details>` : ""}`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = btn.dataset.label || "전송";
-    }
-  }
-
-  btn.dataset.label = btn.textContent;
-  btn.onclick = doSend;
-  inputEl.addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
-  });
+function modeBadge(data) {
+  const label = MODE_LABELS[data.mode] || (data.intent ? data.intent : "");
+  return label ? `<span class="badge intent">${escapeHtml(label)}</span>` : "";
 }
+
+// ---------- send handler (단일 입력 → /query, 서버가 의도 판단) ----------
+const inputEl = $("#req-input");
+const sendBtn = $("#send-btn");
+const diagnoseBtn = $("#diagnose-btn");
+const thread = $("#thread");
+
+// 새 요청(턴)마다 .turn 래퍼를 만들어 #thread 맨 앞에 꽂는다 — 턴 안에서는 질문→답변 순서를
+// 유지하면서, 턴들 사이에서는 최신 요청이 위로 오게 한다.
+function newTurn() {
+  const turn = document.createElement("div");
+  turn.className = "turn";
+  thread.insertBefore(turn, thread.firstChild);
+  return turn;
+}
+
+// withToken=false로 보내면 항상 기존 /query 진단 경로(run_query)로 간다 — 토큰 필드에 값이
+// 있어도 무시하고 "이 SQL을 진단해줘"를 결정적으로 보장한다("수정해서 재진단" 버튼용).
+async function doSend(withToken = true, labelText) {
+  const q = inputEl.value.trim();
+  if (!q) return;
+  inputEl.value = "";
+  sendBtn.disabled = true;
+  diagnoseBtn.disabled = true;
+  (withToken ? sendBtn : diagnoseBtn).innerHTML = '<span class="spinner"></span>';
+
+  const turn = newTurn();
+
+  const userBubble = document.createElement("div");
+  userBubble.className = "msg-user";
+  userBubble.textContent = q;
+  turn.appendChild(userBubble);
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<span class="spinner"></span> ${labelText || "처리 중…"}`;
+  turn.appendChild(card);
+  turn.scrollIntoView({behavior: "smooth", block: "start"});
+
+  const body = {question: q, session_id: sessionId};
+  try {
+    const data = await postJSON("/query", body, withToken);
+    if (data.session_id) sessionId = data.session_id;
+    data.__originalInput = q; // 진단 결과에서 "수정해서 재진단"할 때 재사용
+    renderByMode(card, data);
+  } catch (e) {
+    card.innerHTML = `<div class="badges"><span class="badge error">error</span></div>
+      <div class="answer">${escapeHtml(e.message)}</div>
+      ${e.raw ? `<details><summary>원본 응답 보기</summary><pre>${escapeHtml(e.raw)}</pre></details>` : ""}`;
+  } finally {
+    sendBtn.disabled = false;
+    diagnoseBtn.disabled = false;
+    sendBtn.textContent = "보내기";
+    diagnoseBtn.textContent = "실행계획 진단";
+  }
+}
+
+// SQL 블록을 편집해서 재요청할 수 있게 입력창에 채워준다 (```sql ...``` 펜스는 벗겨낸다).
+function stripSqlFences(text) {
+  const m = /^```(?:sql)?\s*([\s\S]*?)\s*```$/i.exec((text || "").trim());
+  return (m ? m[1] : text || "").trim();
+}
+
+function editSqlAndFocus(rawSql) {
+  inputEl.value = stripSqlFences(rawSql);
+  inputEl.focus();
+  inputEl.scrollIntoView({behavior: "smooth", block: "center"});
+}
+
+sendBtn.onclick = () => doSend(true);
+diagnoseBtn.onclick = () => doSend(false, "실행계획 진단 중…");
+inputEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
+});
 
 // ---------- render helpers ----------
 function renderTrace(data) {
@@ -398,25 +422,37 @@ function renderAnalysis(analysis) {
     parts.push('<div class="section-title">개선안</div>');
     improvements.forEach((imp, i) => {
       const riskClass = imp.risk_level || "read";
-      const canApply = riskClass === "write" || riskClass === "destructive";
       parts.push(`<div class="imp">
         <div class="rec"><span class="badge ${riskClass}">${escapeHtml(riskClass)}</span> ${escapeHtml(imp.recommendation)}</div>
         <div class="meta">대상 원인: ${escapeHtml(imp.target_cause)} · 기대효과: ${escapeHtml(imp.expected_effect)}</div>
         ${imp.example ? `<pre class="example">${escapeHtml(imp.example)}</pre>` : ""}
-        ${canApply ? `<button class="ghost apply-btn" data-idx="${i}">실행 요청 →</button>` : ""}
       </div>`);
     });
   }
   return parts.join("");
 }
 
-// ① SQL 생성 렌더러
+// SQL 생성 (mode: business_requirement)
 function renderGenerate(card, data) {
   const parts = [];
   parts.push(`<div class="badges">
     <span class="badge ${escapeHtml(data.status)}">${escapeHtml(data.status)}</span>
-    <span class="badge">SQL 생성</span>
+    ${modeBadge(data)}
   </div>`);
+
+  if (data.status === "awaiting_plan_approval") {
+    parts.push(`<div class="answer">${escapeHtml(data.answer || "계획 승인이 필요합니다.")}</div>`);
+    if (data.requirement_plan?.length) {
+      parts.push('<div class="section-title">승인할 처리 계획</div><ul class="step-list">');
+      data.requirement_plan.forEach(step => parts.push(`<li>${escapeHtml(step)}</li>`));
+      parts.push('</ul>');
+    }
+    parts.push('<div class="row"><button class="plan-approve-btn">계획 승인 후 SQL 생성</button><button class="secondary plan-reject-btn">거절</button></div>');
+    card.innerHTML = parts.join("");
+    $(".plan-approve-btn", card).onclick = () => submitPlanDecision(data.session_id, "approve", card);
+    $(".plan-reject-btn", card).onclick = () => submitPlanDecision(data.session_id, "reject", card);
+    return;
+  }
 
   if (data.status !== "ok") {
     parts.push(`<div class="answer">${escapeHtml(data.reason || data.answer || "응답 없음")}</div>`);
@@ -435,6 +471,7 @@ function renderGenerate(card, data) {
   if (data.sql_draft) {
     parts.push('<div class="section-title">생성된 SQL 초안</div>');
     parts.push(`<pre>${escapeHtml(data.sql_draft)}</pre>`);
+    parts.push('<button class="ghost edit-sql-btn" data-role="draft">✏️ 수정해서 재요청</button>');
   }
 
   if (data.validation) {
@@ -456,18 +493,36 @@ function renderGenerate(card, data) {
       </div>`);
   }
 
+  // 생성된 SQL도 후보/직접 진단과 동일한 근본 원인·개선안 분석을 받는다(review_plan 단계에서
+  // 진단 그래프를 함께 호출함 — 실행계획 위험도만으로는 "왜"가 안 보이기 때문).
+  parts.push(renderAnalysis(data.analysis));
+
   parts.push(renderTrace(data));
   card.innerHTML = parts.join("");
+
+  const draftBtn = $(".edit-sql-btn[data-role='draft']", card);
+  if (draftBtn) draftBtn.onclick = () => editSqlAndFocus(data.sql_draft);
+
 }
 
-// ② SQL 검증 렌더러
+async function submitPlanDecision(session, decision, card) {
+  card.innerHTML = '<span class="spinner"></span> 계획 처리 중…';
+  try {
+    const data = await postJSON(`/plans/${encodeURIComponent(session)}/approve`, {decision}, true);
+    if (data.session_id) sessionId = data.session_id;
+    renderGenerate(card, data);
+  } catch (e) {
+    card.innerHTML = `<div class="badges"><span class="badge error">error</span></div><div class="answer">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// SQL 검증 (mode: sql_validation)
 function renderValidate(card, data) {
   const parts = [];
-  const resultBadge = data.result || data.status;
   parts.push(`<div class="badges">
     <span class="badge ${escapeHtml(data.status)}">${escapeHtml(data.status)}</span>
     ${data.result ? `<span class="badge ${escapeHtml(data.result)}">${escapeHtml(data.result?.toUpperCase() || "")}</span>` : ""}
-    <span class="badge">SQL 검증</span>
+    ${modeBadge(data)}
   </div>`);
 
   if (data.status === "blocked") {
@@ -481,6 +536,9 @@ function renderValidate(card, data) {
   if (data.annotated_sql) {
     parts.push('<div class="section-title">승인 주석 SQL</div>');
     parts.push(`<pre>${escapeHtml(data.annotated_sql)}</pre>`);
+    if (data.result !== "accept") {
+      parts.push('<button class="ghost edit-sql-btn" data-role="annotated">✏️ 수정 후 다시 검증</button>');
+    }
   }
 
   if (data.review_id) {
@@ -489,14 +547,17 @@ function renderValidate(card, data) {
 
   parts.push(renderTrace(data));
   card.innerHTML = parts.join("");
+
+  const annotatedBtn = $(".edit-sql-btn[data-role='annotated']", card);
+  if (annotatedBtn) annotatedBtn.onclick = () => editSqlAndFocus(data.annotated_sql);
 }
 
-// ③ 후보 탐색 렌더러
+// 후보 탐색 (mode: candidate_search)
 function renderCandidates(card, data) {
   const parts = [];
   parts.push(`<div class="badges">
     <span class="badge ${escapeHtml(data.status)}">${escapeHtml(data.status)}</span>
-    <span class="badge">운영 SQL 탐색</span>
+    ${modeBadge(data)}
   </div>`);
 
   if (data.status !== "ok") {
@@ -527,38 +588,40 @@ function renderCandidates(card, data) {
   parts.push(renderTrace(data));
   card.innerHTML = parts.join("");
 
-  // 진단 요청 버튼 이벤트
   $$(".select-btn", card).forEach(btn => {
-    btn.onclick = () => diagnoseCandidateSqlId(btn.dataset.sqlid, card.parentElement);
+    const cand = candidates.find(c => c.sql_id === btn.dataset.sqlid);
+    btn.onclick = () => diagnoseCandidateSqlId(btn.dataset.sqlid, card.parentElement, cand?.masked_sql || "");
   });
 }
 
-async function diagnoseCandidateSqlId(sqlId, thread) {
+async function diagnoseCandidateSqlId(sqlId, threadEl, maskedSql) {
   const card = document.createElement("div");
   card.className = "card";
   card.innerHTML = `<span class="spinner"></span> <b>${escapeHtml(sqlId)}</b> 진단 중…`;
-  thread.appendChild(card);
+  threadEl.appendChild(card);
   card.scrollIntoView({behavior: "smooth", block: "end"});
 
-  // 선택된 후보 카드를 하이라이트
   const candidateEl = $(`#cand-${sqlId}`);
   if (candidateEl) candidateEl.classList.add("selected");
 
   try {
-    const data = await postJSON("/candidates/diagnose", {sql_id: sqlId}, true);
-    renderDiagnosis(card, data);
+    const data = await postJSON("/candidates/diagnose", {sql_id: sqlId, session_id: sessionId}, true);
+    if (data.session_id) sessionId = data.session_id;
+    // 마스킹된 SQL이라도 "수정해서 재진단" 시작점으로는 유용하다(값만 채워 넣으면 됨).
+    data.__originalInput = maskedSql || "";
+    renderByMode(card, data);
   } catch (e) {
     card.innerHTML = `<div class="badges"><span class="badge error">error</span></div>
       <div class="answer">${escapeHtml(e.message)}</div>`;
   }
 }
 
-// ④ 실행계획 진단 렌더러 (기존 /query)
+// 실행계획 진단 / 지식 질문 (mode: diagnosis | candidate_diagnose | knowledge, 상태 오류의 기본 렌더러)
 function renderDiagnosis(card, data) {
   const parts = [];
   parts.push(`<div class="badges">
     <span class="badge ${escapeHtml(data.status)}">${escapeHtml(data.status)}</span>
-    ${data.mode ? `<span class="badge">${escapeHtml(data.mode)}</span>` : ""}
+    ${modeBadge(data)}
     ${data.sql_id ? `<span class="badge">${escapeHtml(data.sql_id)}</span>` : ""}
   </div>`);
 
@@ -571,6 +634,11 @@ function renderDiagnosis(card, data) {
   parts.push(`<div class="answer">${escapeHtml(data.analysis?.summary || data.answer || "")}</div>`);
   parts.push(renderAnalysis(data.analysis));
 
+  const isSqlDiagnosis = data.mode === "diagnosis" || data.mode === "candidate_diagnose";
+  if (isSqlDiagnosis && data.__originalInput) {
+    parts.push('<button class="ghost edit-sql-btn" data-role="diag">✏️ 수정해서 재진단</button>');
+  }
+
   if (data.contexts && data.contexts.length) {
     parts.push(`<details><summary>참조 컨텍스트 (${data.contexts.length})</summary>
       ${data.contexts.map(c => `<div class="section-title">${escapeHtml(c.doc_id || "")}</div><pre>${escapeHtml(c.text)}</pre>`).join("")}
@@ -580,132 +648,21 @@ function renderDiagnosis(card, data) {
   parts.push(renderTrace(data));
   card.innerHTML = parts.join("");
 
-  $$(".apply-btn", card).forEach(btn => {
-    const improvements = data.analysis?.improvements || [];
-    btn.onclick = () => openHitlFromImprovement(improvements[+btn.dataset.idx]);
-  });
+
+  const diagBtn = $(".edit-sql-btn[data-role='diag']", card);
+  if (diagBtn) diagBtn.onclick = () => editSqlAndFocus(data.__originalInput);
 }
 
-// ① generate 흐름
-makeSendHandler(
-  "#req-generate", "#send-generate", "#thread-generate",
-  "/generate", q => ({requirement: q}), renderGenerate, true
-);
-
-// ② validate 흐름
-makeSendHandler(
-  "#req-validate", "#send-validate", "#thread-validate",
-  "/validate", q => ({sql: q}), renderValidate, true
-);
-
-// ③ candidates 흐름
-makeSendHandler(
-  "#req-candidates", "#send-candidates", "#thread-candidates",
-  "/candidates", q => ({question: q}), renderCandidates, true
-);
-
-// ④ diagnosis 흐름 (기존 /query, 토큰 불필요)
-makeSendHandler(
-  "#req-diagnosis", "#send-diagnosis", "#thread-diagnosis",
-  "/query", q => ({question: q}), renderDiagnosis, false
-);
-
-// ---------- HITL panel ----------
-const hitlTool = $("#hitl-tool");
-const hitlArgs = $("#hitl-args");
-const hitlSubmit = $("#hitl-submit");
-const hitlFlow = $("#hitl-flow");
-
-const TOOL_FIELDS = {
-  gather_stats: [{name: "table_name", label: "테이블명", placeholder: "ORDERS"}],
-  create_index: [
-    {name: "table_name", label: "테이블명", placeholder: "ORDERS"},
-    {name: "index_ddl", label: "인덱스 DDL", placeholder: "CREATE INDEX idx_orders_date ON orders(order_date)"},
-  ],
-};
-
-function renderHitlFields() {
-  const fields = TOOL_FIELDS[hitlTool.value] || [];
-  hitlArgs.innerHTML = fields.map(f => `
-    <label>${escapeHtml(f.label)}</label>
-    <input data-field="${f.name}" placeholder="${escapeHtml(f.placeholder)}">
-  `).join("");
-}
-hitlTool.onchange = renderHitlFields;
-renderHitlFields();
-
-function openHitlFromImprovement(imp) {
-  const text = (imp.recommendation + " " + (imp.example || "")).toLowerCase();
-  hitlTool.value = text.includes("인덱스") || text.includes("index") ? "create_index" : "gather_stats";
-  renderHitlFields();
-  if (hitlTool.value === "create_index") {
-    const ddlMatch = imp.example && /create\s+index[\s\S]*/i.exec(imp.example);
-    if (ddlMatch) $('input[data-field="index_ddl"]', hitlArgs).value = ddlMatch[0].split("\n")[0];
-  }
-  $("aside").scrollIntoView({behavior: "smooth", block: "start"});
-}
-
-hitlSubmit.onclick = async () => {
-  const tool = hitlTool.value;
-  const args = {};
-  $$("input", hitlArgs).forEach(inp => { args[inp.dataset.field] = inp.value; });
-
-  hitlSubmit.disabled = true;
-  hitlFlow.innerHTML = '<div class="hitl-empty"><span class="spinner"></span> 요청 전송 중…</div>';
-  try {
-    const data = await postJSON("/actions/apply", {tool, args});
-    renderHitlState(data);
-  } catch (e) {
-    hitlFlow.innerHTML = `<div class="hitl-approval">오류: ${escapeHtml(e.message)}</div>
-      ${e.raw ? `<details><summary>원본 응답 보기</summary><pre>${escapeHtml(e.raw)}</pre></details>` : ""}`;
-  } finally {
-    hitlSubmit.disabled = false;
-  }
-};
-
-function renderHitlState(data) {
-  if (data.status === "awaiting_approval") {
-    hitlFlow.innerHTML = `
-      <div class="hitl-approval">
-        <div><b>승인 대기</b> — ${escapeHtml(data.reason || "")}</div>
-        <div style="margin-top:4px">도구: <code>${escapeHtml(data.tool)}</code></div>
-        <pre>${escapeHtml(JSON.stringify(data.args, null, 2))}</pre>
-        <div class="row">
-          <button data-decision="approve">승인</button>
-          <button class="secondary" data-decision="modify">수정 후 승인</button>
-          <button class="danger" data-decision="reject">거절</button>
-        </div>
-      </div>`;
-    $$('[data-decision]', hitlFlow).forEach(btn => {
-      btn.onclick = () => decide(data.approval_id, btn.dataset.decision, data.args);
-    });
-  } else if (data.status === "done") {
-    hitlFlow.innerHTML = `<div class="hitl-result"><b>완료</b><pre>${escapeHtml(data.result)}</pre></div>`;
-  } else {
-    hitlFlow.innerHTML = `<div class="hitl-approval">${escapeHtml(JSON.stringify(data))}</div>`;
+// ---------- mode → renderer dispatch (서버가 분류한 결과를 UI가 구분해 보여준다) ----------
+function renderByMode(card, data) {
+  switch (data.mode) {
+    case "business_requirement": return renderGenerate(card, data);
+    case "sql_validation": return renderValidate(card, data);
+    case "candidate_search": return renderCandidates(card, data);
+    default: return renderDiagnosis(card, data); // diagnosis | candidate_diagnose | knowledge | blocked/no_answer/error(모드 없음)
   }
 }
 
-async function decide(approvalId, decision, currentArgs) {
-  let args = {};
-  let reason = "";
-  if (decision === "modify") {
-    const patch = prompt("수정할 값을 JSON으로 입력하세요 (예: {\"table_name\":\"ORDERS2\"})", JSON.stringify(currentArgs));
-    if (patch === null) return;
-    try { args = JSON.parse(patch); } catch { alert("JSON 형식이 올바르지 않습니다."); return; }
-  }
-  if (decision === "reject") {
-    reason = prompt("거절 사유(선택)", "") || "";
-  }
-  hitlFlow.innerHTML = '<div class="hitl-empty"><span class="spinner"></span> 처리 중…</div>';
-  try {
-    const data = await postJSON(`/approve/${approvalId}`, {decision, args, reason});
-    renderHitlState(data);
-  } catch (e) {
-    hitlFlow.innerHTML = `<div class="hitl-approval">오류: ${escapeHtml(e.message)}</div>
-      ${e.raw ? `<details><summary>원본 응답 보기</summary><pre>${escapeHtml(e.raw)}</pre></details>` : ""}`;
-  }
-}
 </script>
 </body>
 </html>

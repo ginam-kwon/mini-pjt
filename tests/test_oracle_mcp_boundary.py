@@ -262,34 +262,35 @@ class TestRunUserSqlMCPPath:
 # ---------------------------------------------------------------------------
 
 class TestSqlclMcpConfig:
-    """_sqlcl_connected_config가 Oracle 접속 정보를 올바르게 포함하는지 확인한다."""
+    """_sqlcl_connected_config·_sqlcl_connection_name·_connect_and_get_sql_tool을 검증한다.
 
-    def test_config_includes_connection_when_dsn_set(self):
-        """ORACLE_DSN, ORACLE_APP_USER, ORACLE_APP_PASSWORD가 모두 있으면 args에 접속 정보가 포함된다."""
+    seed v2.6.0: 접속 문자열을 CLI 인자로 넘겨도 MCP 세션의 connect 도구는 이를 쓰지 않는다는
+    것을 실측으로 확인했다("Connection not established"/"Connection not found: appuser") —
+    SQLcl MCP의 connect 도구는 connmgr에 사전 저장된 연결 이름만 받는다. 그래서 args는 이제
+    '-mcp'만 넘기고, 연결은 각 세션에서 connect 도구를 SQLCL_CONNECTION_NAME으로 명시 호출해
+    맺는다(_connect_and_get_sql_tool). README '실DB 셋업'의 호스트 1회성 설정 참고.
+    """
+
+    def test_config_is_always_mcp_only_regardless_of_env(self):
+        """ORACLE_DSN/USER/PASSWORD가 있어도 args는 '-mcp'만 포함한다(접속 문자열을 넣지 않음)."""
         from src import tools
 
-        with (
-            patch.dict(
-                "os.environ",
-                {
-                    "ORACLE_DSN": "localhost:1521/FREEPDB1",
-                    "ORACLE_APP_USER": "appuser",
-                    "ORACLE_APP_PASSWORD": "secret",
-                },
-            )
+        with patch.dict(
+            "os.environ",
+            {
+                "ORACLE_DSN": "localhost:1521/FREEPDB1",
+                "ORACLE_APP_USER": "appuser",
+                "ORACLE_APP_PASSWORD": "secret",
+            },
         ):
             config = tools._sqlcl_connected_config()
 
         oracle_cfg = config["oracle-sqlcl"]
         assert oracle_cfg["transport"] == "stdio"
-        assert "-mcp" in oracle_cfg["args"]
-        # 접속 문자열이 args에 포함되어야 한다
-        joined = " ".join(oracle_cfg["args"])
-        assert "appuser" in joined
-        assert "localhost:1521/FREEPDB1" in joined
+        assert oracle_cfg["args"] == ["-mcp"]
 
     def test_config_no_connection_when_dsn_missing(self):
-        """ORACLE_DSN이 없으면 접속 정보 없이 '-mcp' arg만 포함한다."""
+        """ORACLE_DSN이 없어도 args는 동일하게 '-mcp'만 포함한다."""
         import os
         from src import tools
 
@@ -301,6 +302,41 @@ class TestSqlclMcpConfig:
 
         oracle_cfg = config["oracle-sqlcl"]
         assert oracle_cfg["args"] == ["-mcp"]
+
+    def test_connection_name_defaults_to_mini_pjt_conn(self):
+        from src import tools
+        with patch.dict("os.environ", {}, clear=False):
+            os_env = dict(__import__("os").environ)
+            os_env.pop("SQLCL_CONNECTION_NAME", None)
+            with patch.dict("os.environ", os_env, clear=True):
+                assert tools._sqlcl_connection_name() == "mini_pjt_conn"
+
+    def test_connection_name_reads_env_override(self):
+        from src import tools
+        with patch.dict("os.environ", {"SQLCL_CONNECTION_NAME": "custom_conn"}):
+            assert tools._sqlcl_connection_name() == "custom_conn"
+
+    def test_connect_and_get_sql_tool_calls_connect_with_saved_name(self):
+        """세션에서 connect 도구를 SQLCL_CONNECTION_NAME으로 호출한 뒤 sql_run 도구를 반환한다."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from src import tools
+
+        connect_tool = MagicMock(name="connect")
+        connect_tool.ainvoke = AsyncMock(return_value="connected")
+        sql_run_tool = MagicMock(name="sql_run")
+        sql_run_tool.name = "sql_run"
+        connect_tool.name = "connect"
+
+        async def fake_load_mcp_tools(session):
+            return [connect_tool, sql_run_tool]
+
+        with patch("langchain_mcp_adapters.tools.load_mcp_tools", side_effect=fake_load_mcp_tools), \
+             patch.dict("os.environ", {"SQLCL_CONNECTION_NAME": "test_conn"}):
+            result_tool = asyncio.run(tools._connect_and_get_sql_tool(session=object()))
+
+        connect_tool.ainvoke.assert_called_once_with({"connection_name": "test_conn"})
+        assert result_tool is sql_run_tool
 
 
 # ---------------------------------------------------------------------------

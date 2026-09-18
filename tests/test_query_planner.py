@@ -258,10 +258,15 @@ class TestStepExecutionOrder:
             patch.object(pe, "_draft_sql_node",
                          side_effect=make_tracker("draft_sql", {"sql_draft": "SELECT 1 FROM dual"})),
             patch.object(pe, "_validate_sql_node", side_effect=make_tracker("validate_sql", validate_return)),
+            # _review_plan_node는 이제 async(진단 그래프도 함께 호출하므로) — patch.object가
+            # 원본이 코루틴 함수임을 감지해 side_effect를 AsyncMock으로 감싼다. 그러면 이 노드가
+            # ainvoke 전용으로 등록돼 graph.invoke(동기)가 "No synchronous function" 에러를
+            # 낸다 — 그래서 이 테스트도 ainvoke로 바꾼다(실제 run_business_requirement도 항상
+            # ainvoke만 쓴다).
             patch.object(pe, "_review_plan_node", side_effect=make_tracker("review_plan", review_return)),
         ):
             graph = pe.build_query_planner_graph()
-            graph.invoke({
+            asyncio.run(graph.ainvoke({
                 "requirement": "미결 주문 조회",
                 "steps_completed": [],
                 "schema_info": "",
@@ -269,8 +274,9 @@ class TestStepExecutionOrder:
                 "validation": None,
                 "explain_plan": "",
                 "risk_assessment": None,
+                "analysis": None,
                 "answer": "",
-            })
+            }))
 
         assert call_order == EXPECTED_STEPS, (
             f"노드 실행 순서가 다릅니다.\n기대: {EXPECTED_STEPS}\n실제: {call_order}"

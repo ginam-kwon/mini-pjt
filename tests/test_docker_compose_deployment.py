@@ -200,7 +200,7 @@ class TestFastAPIHealthEndpoint:
     @staticmethod
     def _client():
         from fastapi.testclient import TestClient
-        from src.agent import app
+        from src.api import app
         return TestClient(app)
 
     def test_health_returns_ok(self):

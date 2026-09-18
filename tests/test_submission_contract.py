@@ -1,8 +1,10 @@
 """AC 19 — 미니 프로젝트 제출 계약 검증.
 
 기존 제출 구조(README·SERVICE·evaluation 산출물·src/data/evaluation 디렉터리)와
-FastAPI `POST /query` 의 `answer`·`contexts`·`trace` 응답 계약이 유지되면서,
-새 요청 유형(SQL 생성·SQL 검증·후보 탐색·후보 진단)이 문서에 일관되게 기록되었는지 확인한다.
+FastAPI `POST /query` 의 `answer`·`contexts`·`trace` 응답 계약이 유지되는지 확인한다.
+SQL 생성·SQL 검증·후보 탐색은 `POST /query`가 처리하고, 후보 진단은
+`POST /candidates/diagnose`가 처리한다. `POST /query`는 토큰 유무와 관계없이 Supervisor가
+라우팅하며, 보호 Agent의 전용 Tool 경계에서 인증한다.
 
 LLM/DB 호출 없이 결정적으로 재현 가능한 경로(빈 입력, 변경 SQL 차단)만 사용한다.
 """
@@ -17,14 +19,6 @@ README = ROOT / "README.md"
 SERVICE = ROOT / "SERVICE.md"
 
 CONTRACT_FIELDS = ("answer", "contexts", "trace")
-
-# 새로 추가된 요청 유형별 전용 진입점
-NEW_ROUTES = {
-    "/generate": "requirement",
-    "/validate": "sql",
-    "/candidates": "question",
-    "/candidates/diagnose": "sql_id",
-}
 
 
 @pytest.fixture(scope="module")
@@ -41,7 +35,7 @@ def service_text() -> str:
 def client():
     from fastapi.testclient import TestClient
 
-    from src.agent import app
+    from src.api import app
 
     return TestClient(app)
 
@@ -84,7 +78,7 @@ class TestSubmissionStructure:
         assert (ROOT / relpath).is_file(), f"평가 산출물 누락: {relpath}"
 
     def test_query_entrypoint_module_exists(self):
-        assert (ROOT / "src" / "agent.py").is_file(), "진입점 src/agent.py 누락"
+        assert (ROOT / "src" / "api.py").is_file(), "진입점 src/api.py 누락"
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +92,27 @@ class TestQueryResponseContract:
         paths = {r.path for r in client.app.routes}
         assert "/query" in paths, "POST /query 라우트가 사라짐"
 
-    def test_query_accepts_only_question_field(self):
-        from src.agent import QueryRequest
+    def test_query_accepts_question_session_id_fields(self):
+        """seed v2.6.0: /assist 흡수로 question 외에 session_id가 하위호환 확장으로 추가됐다 —
+        기존처럼 question만 보내는 호출은 여전히 동일하게 동작한다. seed v2.7.0에서 sql_id는
+        다시 /candidates/diagnose 전용 필드로 분리했다(자연어가 아닌 결정적 선택이라 /query와
+        섞지 않는다)."""
+        from src.api import QueryRequest
 
-        assert set(QueryRequest.model_fields) == {"question"}, (
-            "POST /query 요청 계약은 question 단일 필드를 유지해야 한다"
+        assert set(QueryRequest.model_fields) == {"question", "session_id"}, (
+            "POST /query 요청 계약은 question/session_id만 허용해야 한다"
         )
+        # 기본값이 있어야 기존처럼 {"question": str}만 보내도 그대로 동작한다
+        req = QueryRequest(question="hi")
+        assert req.session_id == ""
+
+    def test_candidates_diagnose_request_fields(self):
+        """POST /candidates/diagnose는 sql_id(필수)/session_id(선택)만 받는다."""
+        from src.api import CandidateDiagnoseRequest
+
+        assert set(CandidateDiagnoseRequest.model_fields) == {"sql_id", "session_id"}
+        req = CandidateDiagnoseRequest(sql_id="abc123")
+        assert req.session_id == ""
 
     def test_query_does_not_require_approver_token(self, client):
         """기존 제출 계약 보존 — /query 는 토큰 없이도 계약대로 응답한다(401/403 아님)."""
@@ -133,16 +142,11 @@ class TestQueryResponseContract:
 
 
 # ---------------------------------------------------------------------------
-# 3. 새 요청 유형이 동일한 응답 계약을 따른다
+# 3. /query가 흡수한 요청 유형들도 동일한 응답 계약을 따른다
 # ---------------------------------------------------------------------------
 
-class TestNewRequestTypesShareContract:
-    """새 요청 유형도 answer·contexts·trace 계약을 공유해야 한다."""
-
-    @pytest.mark.parametrize("path", sorted(NEW_ROUTES))
-    def test_new_routes_registered(self, client, path):
-        paths = {r.path for r in client.app.routes}
-        assert path in paths, f"새 요청 유형 라우트 누락: {path}"
+class TestAbsorbedRequestTypesShareContract:
+    """/query에 흡수된 SQL 생성·검증·후보 탐색·후보 진단도 answer·contexts·trace 계약을 공유한다."""
 
     @pytest.mark.parametrize(
         "func_name,arg",
@@ -180,15 +184,7 @@ class TestNewRequestTypesShareContract:
 # ---------------------------------------------------------------------------
 
 class TestDocumentationConsistency:
-    """새 요청 유형이 README·SERVICE·평가 리포트에 일관되게 기록되어야 한다."""
-
-    @pytest.mark.parametrize("path", sorted(NEW_ROUTES))
-    def test_readme_documents_new_routes(self, readme_text, path):
-        assert path in readme_text, f"README에 {path} 요청 유형 설명 없음"
-
-    @pytest.mark.parametrize("path", sorted(NEW_ROUTES))
-    def test_service_documents_new_routes(self, service_text, path):
-        assert path in service_text, f"SERVICE.md에 {path} 요청 유형 설명 없음"
+    """/query가 흡수한 요청 유형이 README·SERVICE·평가 리포트에 일관되게 기록되어야 한다."""
 
     def test_readme_documents_query_contract(self, readme_text):
         assert "/query" in readme_text, "README에 기존 /query 진입점 설명 없음"
@@ -234,8 +230,7 @@ class TestDocumentationConsistency:
 
     def test_round2_report_documents_request_types(self):
         text = (ROOT / "evaluation" / "round2_report.md").read_text(encoding="utf-8")
-        for path in sorted(NEW_ROUTES):
-            assert path in text, f"round2_report.md에 {path} 요청 유형 기록 없음"
+        assert "/query" in text, "round2_report.md에 /query 요청 유형 기록 없음"
         for field in CONTRACT_FIELDS:
             assert field in text, f"round2_report.md에 응답 계약 필드 {field} 기록 없음"
 
@@ -253,11 +248,11 @@ class TestDocsMatchImplementation:
 
     def test_all_documented_routes_exist_in_app(self, client, readme_text):
         paths = {r.path for r in client.app.routes}
-        documented = ["/query", *NEW_ROUTES, "/actions/apply"]
+        documented = ["/query", "/candidates/diagnose", "/actions/apply"]
         for path in documented:
             assert path in readme_text, f"README에 {path} 설명 없음"
             assert path in paths, f"README가 설명한 {path} 라우트가 앱에 없음"
+        assert "/assist" not in paths, "폐기된 /assist 라우트가 앱에 남아 있음"
 
-    @pytest.mark.parametrize("path,field", sorted(NEW_ROUTES.items()))
-    def test_request_body_field_documented(self, readme_text, path, field):
-        assert f'"{field}"' in readme_text, f"README에 {path} 요청 본문 필드 {field} 설명 없음"
+    def test_sql_id_field_documented(self, readme_text):
+        assert '"sql_id"' in readme_text, "README에 /candidates/diagnose의 sql_id 요청 본문 필드 설명 없음"

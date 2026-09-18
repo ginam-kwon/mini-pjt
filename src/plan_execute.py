@@ -155,6 +155,7 @@ class QueryPlannerState(TypedDict):
     validation: dict | None
     explain_plan: str
     risk_assessment: dict | None
+    analysis: dict | None
     answer: str
 
 
@@ -264,8 +265,12 @@ def _validate_sql_node(state: QueryPlannerState) -> dict:
     }
 
 
-def _review_plan_node(state: QueryPlannerState) -> dict:
-    """5단계: 실행계획 검토 — 검증된 SQL의 예상 실행계획을 SQLcl MCP로 조회해 위험도를 평가한다."""
+async def _review_plan_node(state: QueryPlannerState) -> dict:
+    """5단계: 실행계획 검토 — 검증된 SQL의 예상 실행계획을 SQLcl MCP로 조회해 위험도를 평가하고,
+    후보 진단(run_candidate_diagnose)·직접 SQL 진단(run_query)과 동일한 진단 그래프
+    (explain_agent+knowledge_agent, 근본 원인·개선안)까지 함께 만든다 — 생성된 SQL도 다른 두
+    흐름과 같은 품질의 분석을 받아야 한다는 지적을 반영했다. 진단 자체가 실패해도(예: 쓰로틀링)
+    risk_assessment는 이미 있으므로 응답 전체를 실패시키지 않는다."""
     from src.plan_risk import get_user_sql_explain_plan, assess_risk
     sql = state.get("sql_draft", "")
     validation = state.get("validation") or {}
@@ -275,11 +280,38 @@ def _review_plan_node(state: QueryPlannerState) -> dict:
             "steps_completed": ["review_plan"],
             "explain_plan": "",
             "risk_assessment": {"risk_level": "HIGH", "reason": "SQL 검증 실패", "allow_execution": False},
+            "analysis": None,
             "answer": f"SQL 검증 실패 — 재작성 필요: {validation.get('reason', '')}",
         }
 
     explain_plan = get_user_sql_explain_plan(sql)
     risk = assess_risk(explain_plan)
+
+    analysis = None
+    try:
+        # run_query/run_candidate_diagnose와 같은 캐시된 진단 그래프(+장기 메모리)를 그대로
+        # 재사용한다 — 여기서 새로 만들면 SQL 지문 기반 재사용 캐시가 갈라진다.
+        from src.pipeline import _diagnosis_graph as _shared_diagnosis_graph
+
+        # 이 노드 자체가 이미 실행 중인 query_planner 그래프(store 없이 컴파일됨)의 노드로
+        # 실행되고 있어서, 명시적 config 없이 호출하면 LangGraph가 앰비언트(부모) config를
+        # 상속해 진단 그래프 자신의 store(InMemoryStore)가 아니라 부모의 store(None)를
+        # 주입해버린다 — planner_node에서 `store.get(...)`이 `AttributeError`로 죽는 원인.
+        # 명시적 checkpoint 좌표(checkpoint_ns)를 넘기면 LangGraph가 "이 호출은 자신만의
+        # 체크포인트 계보를 갖는다"고 판단해 상속된 configurable을 버리고 진단 그래프 자신의
+        # store를 쓰게 된다(langgraph._internal._config.ensure_config 참고).
+        diagnosis_result = await _shared_diagnosis_graph().ainvoke(
+            {
+                "sql": sql,
+                "execution_plan": explain_plan,
+                "question": "생성된 SQL의 실행계획을 분석해줘",
+                "past_steps": [],
+            },
+            config={"configurable": {"checkpoint_ns": "query_planner_generated_sql_diagnosis"}},
+        )
+        analysis = diagnosis_result.get("analysis")
+    except Exception as e:
+        print(f"[query_planner] 생성 SQL 진단 실패(무시, risk_assessment만 사용): {type(e).__name__}: {e}")
 
     answer_parts = [
         f"[생성 SQL]\n{sql}",
@@ -288,11 +320,14 @@ def _review_plan_node(state: QueryPlannerState) -> dict:
     ]
     if risk.recommendation:
         answer_parts.append(f"\n[권고사항]\n{risk.recommendation}")
+    if analysis and analysis.get("summary"):
+        answer_parts.append(f"\n[진단 요약]\n{analysis['summary']}")
 
     return {
         "steps_completed": ["review_plan"],
         "explain_plan": explain_plan,
         "risk_assessment": risk.model_dump(),
+        "analysis": analysis,
         "answer": "\n".join(answer_parts),
     }
 
@@ -317,17 +352,3 @@ def build_query_planner_graph():
     builder.add_edge("review_plan", END)
 
     return builder.compile()
-
-
-if __name__ == "__main__":
-    graph = build_diagnosis_graph()
-    sql = open("data/samples/sample_query.sql", encoding="utf-8").read()
-    plan_text = open("data/samples/sample_plan.txt", encoding="utf-8").read()
-
-    print("=== 1차 진단 (메모리 없음) ===")
-    r1 = graph.invoke({"sql": sql, "execution_plan": plan_text, "question": "", "past_steps": []})
-    print(json.dumps(r1["analysis"], ensure_ascii=False, indent=2))
-
-    print("\n=== 2차 진단 (동일 SQL, 메모리 재사용 기대) ===")
-    r2 = graph.invoke({"sql": sql, "execution_plan": plan_text, "question": "", "past_steps": []})
-    print("from_memory 경로였는지:", r2.get("analysis") == r1.get("analysis"))

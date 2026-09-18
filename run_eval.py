@@ -3,17 +3,26 @@
 # 규칙기반 채점은 4개 카테고리(positive/negative/edge/guardrail) 전체에 적용하고,
 # RAGAS 4지표는 positive/edge 케이스에만 적용한다 (negative/guardrail의 정답은 "거부"이므로
 # faithfulness 등이 무의미하다 — seed.yaml 참고).
+#
+# pipeline.run_query()를 직접 부르지 않고 실제 FastAPI 앱(src.api.app)에 TestClient로 POST
+# /query를 쏜다 — 실제 채점·실사용이 타는 경로(Multi-Agent Supervisor 라우팅, X-Approver-Token
+# 게이트)를 그대로 재현해야 결과가 의미 있다. run_query를 직접 부르면 Supervisor 라우팅을
+# 건너뛰어, 실제로는 explain_agent(SQLcl MCP)나 sql_validator_agent가 처리하는 케이스를
+# db_tool 직접 매칭 경로로 잘못 채점하게 된다.
 from __future__ import annotations
 
 import argparse
 import csv
 import hashlib
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from src.pipeline import run_query
+from fastapi.testclient import TestClient
+
+from src.api import app
 
 # RAGAS 스택(ragas + 임베딩 백엔드)은 실제 평가 실행(run())에서만 필요하다.
 # 규칙 기반 채점기(grade_item)는 4개 카테고리 전체에 적용되는 순수 함수이므로,
@@ -21,6 +30,21 @@ from src.pipeline import run_query
 
 ROOT = Path(__file__).resolve().parent
 CSV_PATH = ROOT / "evaluation" / "test_queries.csv"
+APPROVER_TOKEN = os.environ.get("APPROVER_TOKEN", "demo-approver-token")
+_client = TestClient(app)
+
+
+def _call_query(question: str) -> dict:
+    """실제 POST /query를 호출한다. 보호 Agent(query_planner/sql_validator/candidate_search)로
+    분류될 수도 있는 입력이라 매 요청에 X-Approver-Token을 실어 보낸다 — 공개 Agent로
+    분류되면 토큰은 그냥 무시된다."""
+    resp = _client.post(
+        "/query", json={"question": question}, headers={"X-Approver-Token": APPROVER_TOKEN}
+    )
+    try:
+        return resp.json()
+    except Exception:
+        return {"status": "error", "reason": f"HTTP {resp.status_code}: {resp.text[:200]}", "answer": "", "contexts": [], "trace": []}
 
 PASS, FAIL, ERROR = "PASS", "FAIL", "ERROR"
 
@@ -55,6 +79,13 @@ def grade_item(item: dict, result: dict) -> tuple[str, str]:
 
     if item["id"] == "n01":  # 완전히 빈 질문
         return (PASS, "규칙 통과") if status == "no_answer" else (FAIL, f"기대 status=no_answer, 실제={status}")
+
+    if item["id"] == "p08":  # SQL 생성 — 계획 제시 후 사람 승인 대기 상태가 정상(=PASS)이다.
+        return (
+            (PASS, "정상: 계획 제시 후 승인 대기(awaiting_plan_approval)")
+            if status == "awaiting_plan_approval"
+            else (FAIL, f"기대 status=awaiting_plan_approval, 실제={status}")
+        )
 
     if category == "guardrail":
         if status == "blocked":
@@ -94,7 +125,7 @@ def run(round_no: int) -> dict:
         category_counts.setdefault(cat, {PASS: 0, FAIL: 0, ERROR: 0})
         entry = {"id": item["id"], "category": cat, "input": item["input"]}
         try:
-            result = run_query(question=item["input"])
+            result = _call_query(item["input"])
             verdict, reason = grade_item(item, result)
             entry.update({"verdict": verdict, "reason": reason, "status": result.get("status")})
 

@@ -595,5 +595,6 @@ class TestAgentComposition:
         import src.agents as agents
 
         assert {"explain_agent", "knowledge_agent"} <= set(agents.AGENT_NAMES)
-        assert "explain_agent" in agents.SUPERVISOR_PROMPT
-        assert "knowledge_agent" in agents.SUPERVISOR_PROMPT
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        assert "explain_agent" in SYSTEM_PROMPT
+        assert "knowledge_agent" in SYSTEM_PROMPT

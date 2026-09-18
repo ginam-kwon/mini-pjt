@@ -1,9 +1,11 @@
 # agents.py - 서브 에이전트(explain/knowledge/query_planner/sql_validator/candidate_search/general) + Supervisor 조립
 from __future__ import annotations
 
+import contextvars
 from functools import lru_cache
 
 from langchain.agents import create_agent
+from langchain_core.tools import tool
 from langgraph_supervisor import create_supervisor
 
 from src.common import default_llm
@@ -16,6 +18,7 @@ from src.prompts import (
     sql_validator as _sql_validator_mod,
     candidate_search as _candidate_search_mod,
     general as _general_mod,
+    supervisor as _supervisor_mod,
 )
 
 EXPLAIN_SYSTEM_PROMPT = _explain_mod.SYSTEM_PROMPT
@@ -24,24 +27,6 @@ QUERY_PLANNER_SYSTEM_PROMPT = _query_planner_mod.SYSTEM_PROMPT
 SQL_VALIDATOR_SYSTEM_PROMPT = _sql_validator_mod.SYSTEM_PROMPT
 CANDIDATE_SEARCH_SYSTEM_PROMPT = _candidate_search_mod.SYSTEM_PROMPT
 GENERAL_SYSTEM_PROMPT = _general_mod.SYSTEM_PROMPT
-
-SUPERVISOR_PROMPT = """너는 Oracle SQL Copilot 서비스의 supervisor다.
-사용자 요청을 분석해 반드시 아래 담당 에이전트 중 하나에게만 위임해라.
-supervisor는 사용자에게 직접 답하지 않는다 — 반드시 에이전트에게 위임해라.
-
-담당 에이전트:
-- query_planner_agent: 비즈니스 요구사항에서 SELECT SQL을 설계하는 요청
-- sql_validator_agent: 사용자가 직접 입력한 SQL을 검증·실행계획 분석하는 요청
-- candidate_search_agent: 자연어로 운영 중인 시스템의 SQL 후보를 탐색하는 요청
-- explain_agent: SQL 실행계획의 연산자·비용·조건 문제를 분석하는 요청
-- knowledge_agent: Oracle SQL 튜닝 지식·개선 패턴을 조회하는 요청
-- general_agent: 위 다섯 범주에 해당하지 않는 모든 요청(범위 밖 질문, 인사, 잡담 등)
-
-규칙:
-- UPDATE, DELETE, INSERT, DROP, TRUNCATE, ALTER가 포함된 SQL은 어떤 에이전트로도 보내지 말고
-  즉시 거부 메시지를 sql_validator_agent에 전달해 처리하게 해라.
-- 분류가 불명확하면 general_agent로 라우팅해라.
-- supervisor 자신이 직접 사용자 질문에 답하는 것은 금지다. 항상 에이전트를 통해 답해야 한다."""
 
 # 에이전트 이름 상수 — 라우팅 검증에 사용
 AGENT_NAMES = frozenset({
@@ -77,6 +62,107 @@ def _oracle_tools() -> tuple:
     return tuple(mcp_tools or [])
 
 
+# ------------------------------------------------------------------
+# POST /query(토큰 있을 때 Supervisor 전체 라우팅) 지원 — Supervisor가 query_planner_agent/sql_validator_agent/
+# candidate_search_agent 중 하나로 위임하면, 이 에이전트들은 범용 도구 호출 대신 전용 도구
+# 하나만 호출해 pipeline.py의 기존 구현(Plan-Execute 그래프/검증기/후보검색)을 그대로 실행한다.
+#
+# 구조화된 결과(sql_draft/candidates/annotated_sql 등)를 호출부(pipeline.run_via_supervisor)로
+# 돌려주는 방법을 두 번 실측으로 검증하며 골랐다:
+#   1) ContextVar에 도구가 결과를 set() — 실패. LangGraph가 도구 호출을 별도 asyncio Task로
+#      실행해서, 자식 Task가 쓴 값이 부모 Task로 역류하지 않는다(자식은 생성 시점 값을 읽을 수는
+#      있어도 쓴 값을 부모에게 돌려줄 수 없다).
+#   2) 도구 결과를 ToolMessage.content(JSON)에 담아 Supervisor 실행 후 메시지 목록에서 찾기 —
+#      역시 실패. langgraph_supervisor는 하위 에이전트의 내부 도구 호출 기록을 상위 스레드에
+#      노출하지 않고, 그 에이전트의 최종 요약 AIMessage 하나만 상위로 올려보낸다(직접
+#      build_supervisor().ainvoke(...)로 메시지 목록을 덤프해 확인함).
+#   3) (채택) 프로세스 전역 dict(_assist_results)에 도구가 결과를 담고, 요청마다 발급한 UUID를
+#      ContextVar(읽기 전용 방향이라 안전하게 전파됨)로 각 Task에 전달해 그 키로 기록·회수한다.
+#      dict는 Task마다 복사되는 ContextVar와 달리 같은 객체 참조를 공유하므로 자식이 쓴 값을
+#      부모가 그대로 읽을 수 있다.
+# ------------------------------------------------------------------
+_assist_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_assist_session_id", default=None
+)
+_assist_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_assist_request_id", default=None
+)
+_assist_approver_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_assist_approver_token", default=None
+)
+_assist_results: dict[str, dict] = {}
+
+
+def _protected_access_result() -> dict:
+    """보호 Agent가 실제 Tool을 호출하기 전 권한을 확인한다."""
+    from src.auth import check_approver_token
+
+    status, user_hash = check_approver_token(_assist_approver_token.get())
+    if status == "ok":
+        return {"user_hash": user_hash}
+    return {
+        "status": "authorization_required" if status == "missing" else "authorization_forbidden",
+        "reason": "X-Approver-Token 헤더가 필요합니다." if status == "missing" else "유효하지 않은 X-Approver-Token입니다.",
+        "answer": "",
+        "contexts": [],
+        "trace": [],
+    }
+
+
+def _store_assist_result(result: dict) -> None:
+    request_id = _assist_request_id.get()
+    if request_id is not None:
+        _assist_results[request_id] = result
+
+
+@tool
+async def generate_sql_draft(requirement: str) -> str:
+    """비즈니스 요구사항의 처리 계획을 생성해 사람 승인을 요청한다.
+    이 도구를 정확히 한 번 호출하고, 반환된 문자열을 그대로 최종 답변으로 전달해라."""
+    from src.pipeline import prepare_business_requirement
+
+    access = _protected_access_result()
+    if "status" in access:
+        _store_assist_result(access)
+        return access["reason"]
+    result = await prepare_business_requirement(requirement=requirement, session_id=_assist_session_id.get())
+    result.update({"protected": True, "user_hash": access["user_hash"]})
+    _store_assist_result(result)
+    return result.get("answer") or "요청을 처리했습니다."
+
+
+@tool
+async def validate_user_sql(sql: str) -> str:
+    """사용자가 입력한 단일 SELECT/WITH SQL을 accept/revise/reject로 검증한다.
+    이 도구를 정확히 한 번 호출하고, 반환된 문자열을 그대로 최종 답변으로 전달해라."""
+    from src.pipeline import run_sql_validation
+
+    access = _protected_access_result()
+    if "status" in access:
+        _store_assist_result(access)
+        return access["reason"]
+    result = await run_sql_validation(sql=sql)
+    result.update({"protected": True, "user_hash": access["user_hash"]})
+    _store_assist_result(result)
+    return result.get("answer") or "요청을 처리했습니다."
+
+
+@tool
+async def search_operational_candidates(question: str) -> str:
+    """자연어 운영 성능 요청에서 마스킹된 SQL 후보 목록을 찾는다.
+    이 도구를 정확히 한 번 호출하고, 반환된 문자열을 그대로 최종 답변으로 전달해라."""
+    from src.pipeline import run_candidate_search
+
+    access = _protected_access_result()
+    if "status" in access:
+        _store_assist_result(access)
+        return access["reason"]
+    result = await run_candidate_search(question=question, session_id=_assist_session_id.get())
+    result.update({"protected": True, "user_hash": access["user_hash"]})
+    _store_assist_result(result)
+    return result.get("answer") or "요청을 처리했습니다."
+
+
 def build_explain_agent():
     return create_agent(
         model=default_llm(),
@@ -102,7 +188,7 @@ def build_knowledge_agent():
 def build_query_planner_agent():
     return create_agent(
         model=default_llm(),
-        tools=_oracle_tools(),
+        tools=[generate_sql_draft],
         system_prompt=QUERY_PLANNER_SYSTEM_PROMPT,
         middleware=[MaskingMiddleware(), LoggingMiddleware()],
         name="query_planner_agent",
@@ -112,7 +198,7 @@ def build_query_planner_agent():
 def build_sql_validator_agent():
     return create_agent(
         model=default_llm(),
-        tools=_oracle_tools(),
+        tools=[validate_user_sql],
         system_prompt=SQL_VALIDATOR_SYSTEM_PROMPT,
         middleware=[MaskingMiddleware(), LoggingMiddleware()],
         name="sql_validator_agent",
@@ -122,7 +208,7 @@ def build_sql_validator_agent():
 def build_candidate_search_agent():
     return create_agent(
         model=default_llm(),
-        tools=_oracle_tools(),
+        tools=[search_operational_candidates],
         system_prompt=CANDIDATE_SEARCH_SYSTEM_PROMPT,
         middleware=[MaskingMiddleware(), LoggingMiddleware()],
         name="candidate_search_agent",
@@ -159,20 +245,6 @@ def build_supervisor():
             general_agent,
         ],
         model=default_llm(),
-        prompt=SUPERVISOR_PROMPT,
+        prompt=_supervisor_mod.SYSTEM_PROMPT,
     )
-    return supervisor.compile(name="sql_perf_supervisor")
-
-
-if __name__ == "__main__":
-    from langchain_core.messages import HumanMessage
-
-    from src.common import last_nonempty_text
-
-    app = build_supervisor()
-    sql = open("data/samples/sample_query.sql", encoding="utf-8").read()
-    plan = open("data/samples/sample_plan.txt", encoding="utf-8").read()
-    result = app.invoke({"messages": [HumanMessage(
-        f"다음 SQL과 실행계획을 분석해줘.\n\n[SQL]\n{sql}\n\n[실행계획]\n{plan}"
-    )]})
-    print(last_nonempty_text(result["messages"]))
+    return supervisor.compile(name="sqlmanager_supervisor")

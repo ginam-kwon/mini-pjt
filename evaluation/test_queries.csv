@@ -1,13 +1,15 @@
 id,category,input,expected_traits,forbidden,expected_tools,note
-p01,positive,주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘,TO_CHAR;UPPER;인덱스;풀스캔,,db_tool,orders_customers_join 카탈로그 매칭
-p02,positive,결제 테이블 emp_id 조회가 왜 느린지 봐줘,형변환;TO_NUMBER;인덱스,,db_tool,payments_implicit_cast 카탈로그 매칭
-p03,positive,주문 상태가 PENDING인 쿼리 진단해줘. 통계가 오래된 것 같아,통계;DBMS_STATS;카디널리티,,db_tool,orders_stale_stats 카탈로그 매칭
-p04,positive,orders와 order_items 조인이 너무 느려. 원인 좀 봐줘,NESTED LOOPS;풀스캔;인덱스,,db_tool,orders_order_items_join 카탈로그 매칭
-p05,positive,해시 조인에서 tempspc 스필이 나는 쿼리 진단해줘,HASH JOIN;TempSpc;임시,,db_tool,hash_tempspc 카탈로그 매칭
-p06,positive,인덱스 레인지 스캔인데 비용이 비정상적으로 높은 쿼리 봐줘,인덱스;단편화;REBUILD,,db_tool,index_fragmentation 카탈로그 매칭
-p07,positive,region이나 customer_id로 OR 조건 거는 쿼리가 느려. 봐줘,OR;UNION ALL;풀스캔,,db_tool,or_condition 카탈로그 매칭
-e01,edge,풀 테이블 스캔이 항상 나쁜 건 아니라던데 언제 정상인지도 같이 설명하면서 order_items 조인 쿼리도 봐줘,NESTED LOOPS;풀스캔;조건부,,db_tool,지식+진단 복합 케이스
-e02,edge,카디널리티 오추정이 뭔지부터 알려주고 orders 상태 쿼리도 진단해줘,통계;카디널리티,,db_tool,지식 정의+진단 복합
+p01,positive,주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘,TO_CHAR;UPPER;인덱스;풀스캔,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p02,positive,결제 테이블 emp_id 조회가 왜 느린지 봐줘,형변환;TO_NUMBER;인덱스,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p03,positive,주문 상태가 PENDING인 쿼리 진단해줘. 통계가 오래된 것 같아,통계;DBMS_STATS;카디널리티,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p04,positive,orders와 order_items 조인이 너무 느려. 원인 좀 봐줘,NESTED LOOPS;풀스캔;인덱스,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p05,positive,해시 조인에서 tempspc 스필이 나는 쿼리 진단해줘,HASH JOIN;TempSpc;임시,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p06,positive,인덱스 레인지 스캔인데 비용이 비정상적으로 높은 쿼리 봐줘,인덱스;단편화;REBUILD,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p07,positive,region이나 customer_id로 OR 조건 거는 쿼리가 느려. 봐줘,OR;UNION ALL;풀스캔,,explain_agent,Supervisor가 explain_agent(SQLcl MCP)로 위임
+p08,positive,이번 달 미결 주문을 고객별로 보여주는 SQL을 만들어줘,처리 계획;승인;스키마 조회 전,,query_planner_agent;generate_sql_draft,SQL 생성은 계획 제시 후 사람 승인 대기 상태여야 함
+p09,positive,다음 SQL을 검증해줘: SELECT order_id FROM orders WHERE status = 'PENDING',SELECT;검증;실행계획,,sql_validator_agent;validate_user_sql,SELECT 검증과 실행계획 위험 평가 흐름
+e01,edge,풀 테이블 스캔이 항상 나쁜 건 아니라던데 언제 정상인지도 같이 설명하면서 order_items 조인 쿼리도 봐줘,NESTED LOOPS;풀스캔;조건부,,explain_agent,지식+진단 복합 케이스
+e02,edge,카디널리티 오추정이 뭔지부터 알려주고 orders 상태 쿼리도 진단해줘,통계;카디널리티,,explain_agent,지식 정의+진단 복합
 n01,negative,,,,,빈 질문 - no_answer 기대
 n02,negative,MongoDB 샤딩 키 설계 전략을 알려줘,모르;찾지;범위,확정적인 샤딩 키 추천,,Oracle 범위 밖 질문
 n03,negative,내일 로또 번호를 예측해줘,모르;찾지;관련,구체적 번호,,관련 없는 질문

@@ -16,7 +16,9 @@ from src.tools import create_index, gather_stats
 
 TOOL_MAP = {t.name: t for t in [gather_stats, create_index]}
 
-CHECKPOINT_DB = "checkpoints.sqlite"
+# 일반 요청 세션 저장소(src/storage.py)의 checkpoints 테이블과 LangGraph의 체크포인터 테이블은
+# 스키마가 다르다. 같은 파일을 공유하면 `thread_id` 컬럼 충돌로 HITL 요청이 500이 된다.
+CHECKPOINT_DB = "hitl_checkpoints.sqlite"
 
 
 class ActionState(TypedDict):

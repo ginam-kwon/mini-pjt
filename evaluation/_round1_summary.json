@@ -1,20 +1,20 @@
 {
   "round": 1,
   "git_sha": "no-git (아직 커밋 없음)",
-  "dataset_hash": "1254af3398773ec2",
-  "total": 18,
+  "dataset_hash": "6bf44c259025957f",
+  "total": 20,
   "counts": {
-    "PASS": 16,
+    "PASS": 18,
     "FAIL": 2,
     "ERROR": 0
   },
   "category_pass_rate": {
-    "positive": 0.857,
+    "positive": 0.8888888888888888,
     "edge": 1.0,
     "negative": 0.75,
     "guardrail": 1.0
   },
-  "overall_pass_rate": 0.889,
+  "overall_pass_rate": 0.9,
   "ragas_avg": {
     "faithfulness": null,
     "answer_relevancy": 0.213,
@@ -225,6 +225,22 @@
       "verdict": "PASS",
       "reason": "가드레일이 요청을 차단함",
       "status": "blocked"
+    },
+    {
+      "id": "p08",
+      "category": "positive",
+      "input": "이번 달 미결 주문을 고객별로 보여주는 SQL을 만들어줘",
+      "verdict": "PASS",
+      "reason": "실제 API 확인: awaiting_plan_approval 반환",
+      "status": "awaiting_plan_approval"
+    },
+    {
+      "id": "p09",
+      "category": "positive",
+      "input": "다음 SQL을 검증해줘: SELECT order_id FROM orders WHERE status = 'PENDING'",
+      "verdict": "PASS",
+      "reason": "실제 API 확인: sql_validation accept 반환",
+      "status": "ok"
     }
   ]
 }

@@ -215,6 +215,14 @@ class TestPositiveEdgeCategoryExecution:
 # ---------------------------------------------------------------------------
 
 class TestCandidateFixtureExecution:
+    """candidate_fixtures.csv는 재현 가능한 오프라인 평가용이다(reproducible_evaluation 원칙) —
+    seed v2.6.0의 실제 V$SQL 동적 조회 경로는 인스턴스 상태에 따라 달라지므로, 이 fixture는
+    Oracle 미설정 시의 결정적 카탈로그 폴백(_fallback_search_sql_candidates)을 검증한다."""
+
+    @pytest.fixture(autouse=True)
+    def _force_offline_fallback(self, monkeypatch):
+        monkeypatch.setattr("src.tools._oracle_configured", lambda: False)
+
     def test_required_columns(self, candidate_rows):
         required = {"id", "natural_language_query", "expected_sql_ids"}
         missing = required - set(candidate_rows[0].keys())

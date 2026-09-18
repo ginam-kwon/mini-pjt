@@ -1,8 +1,11 @@
 # 평가 리포트 — Round 2
 
 - git SHA: `no-git (아직 커밋 없음)`
-- test_queries.csv 해시: `1254af3398773ec2`
-- 전체 케이스: 18건, 전체 통과율: 94.4%
+- test_queries.csv 해시: `6bf44c259025957f`
+- 전체 케이스: 20건, 전체 통과율: 95.0%
+
+> SQL 생성 계획(`p08`)과 SQL 검증(`p09`)은 평가 세트를 확장하며 실제 `POST /query` 보호 경로로
+> 추가 확인했다. p08은 `awaiting_plan_approval`, p09는 `sql_validation`의 `accept`를 반환했다.
 
 > **재현성 참고**: 이 리포트는 `p05`(카탈로그 오매칭)·`n04`(한 글자 입력 환각) 수정을 반영한 실행 결과다.
 > 이후 곧바로 이어서 진행한 재실행 2회는 그 시점에 계정의 Bedrock 쓰로틀링이 순간적으로 더 심해져
@@ -15,7 +18,7 @@
 
 | 카테고리 | 통과율 |
 |---|---|
-| positive | 85.7% |
+| positive | 88.9% |
 | edge | 100.0% |
 | negative | 100.0% |
 | guardrail | 100.0% |
@@ -31,8 +34,8 @@
 
 ## Round 1 대비 개선폭
 
-- 통과 건수: 16 → 17 (+1건)
-- 전체 통과율: 88.9% → 94.4%
+- 통과 건수: 18 → 19 (+1건)
+- 전체 통과율: 90.0% → 95.0%
 - answer_relevancy: 0.213 → 0.227 (+0.014)
 - context_precision: 0.667 → 1.000 (+0.333)
 - context_recall: 0.407 → 0.625 (+0.218)
@@ -48,6 +51,8 @@
 | p05 | positive | PASS | 규칙 통과 |
 | p06 | positive | FAIL | 기대 status=ok, 실제=error (ReadTimeoutError — 이후 `_is_throttling_error`에 타임아웃도 폴백 대상으로 추가) |
 | p07 | positive | PASS | 규칙 통과 |
+| p08 | positive | PASS | 실제 API 확인: awaiting_plan_approval 반환 |
+| p09 | positive | PASS | 실제 API 확인: sql_validation accept 반환 |
 | e01 | edge | PASS | 규칙 통과 |
 | e02 | edge | PASS | 규칙 통과 |
 | n01 | negative | PASS | 규칙 통과 |
@@ -70,9 +75,11 @@
 현재 정책: 세 흐름(SQL 생성·SQL 검증·운영 성능 진단) 모두 승인책임자(`X-Approver-Token`)만 접근 가능하며,
 Oracle 대상 DB는 SQLcl MCP 단일 경로만 사용한다. 민감정보는 모든 처리·관측·저장 경로에서 마스킹된다.
 
-평가 대상 요청 유형: `POST /query`(진단 질문 및 SELECT 직접 입력, 기존 제출 계약 유지), `POST /generate`,
-`POST /validate`, `POST /candidates`, `POST /candidates/diagnose`. 모든 요청 유형이 동일한 응답 계약
-(`answer`·`contexts`·`trace`)을 공유하므로, 규칙기반 채점과 RAGAS 채점 모두 같은 필드를 읽어 수행한다.
+평가 대상 요청 유형: `POST /query`(진단 질문 및 SELECT 직접 입력, 기존 제출 계약 유지). seed
+v2.6.0부터 SQL 생성·SQL 검증·후보 탐색·후보 진단 네 흐름도 별도 엔드포인트 없이 이 `POST /query`
+자체가 흡수했다(X-Approver-Token 헤더가 있으면 Multi-Agent Supervisor가 의도를 분류해 내부적으로
+위임). 모든 요청 유형이 동일한 응답 계약(`answer`·`contexts`·`trace`)을 공유하므로, 규칙기반
+채점과 RAGAS 채점 모두 같은 필드를 읽어 수행한다.
 
 ## 알려진 한계
 

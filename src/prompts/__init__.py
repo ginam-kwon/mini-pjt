@@ -10,12 +10,12 @@ from src.prompts import (
     knowledge,
     plan_risk,
     query_planner,
-    router,
+    supervisor,
     sql_validator,
 )
 
 ROLE_PROMPT_MAP: dict[str, str] = {
-    "router": router.SYSTEM_PROMPT,
+    "supervisor": supervisor.SYSTEM_PROMPT,
     "query_planner": query_planner.SYSTEM_PROMPT,
     "sql_validator": sql_validator.SYSTEM_PROMPT,
     "candidate_search": candidate_search.SYSTEM_PROMPT,
@@ -30,7 +30,7 @@ REQUIRED_ROLES = frozenset(ROLE_PROMPT_MAP.keys())
 __all__ = [
     "ROLE_PROMPT_MAP",
     "REQUIRED_ROLES",
-    "router",
+    "supervisor",
     "query_planner",
     "sql_validator",
     "candidate_search",

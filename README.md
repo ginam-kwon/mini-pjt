@@ -4,24 +4,50 @@
 
 DBA/백엔드 담당자가 반복적으로 하는 업무를 세 가지 흐름으로 자동화한다.
 
-### 세 흐름 (Three Flows)
+### 진입점 (seed v2.7.0)
 
-| 흐름 | 진입점 | 요청 본문 | 담당 Agent |
-|---|---|---|---|
-| **SQL 생성** — 비즈니스 요구사항에서 SELECT 초안 생성 | `POST /generate` | `{"requirement": str}` | `query_planner_agent` |
-| **SQL 검증** — 사용자가 입력한 SELECT를 accept/revise/reject 판정 | `POST /validate` | `{"sql": str}` | `sql_validator_agent` |
-| **운영 성능 진단(후보 탐색)** — 자연어로 운영 SQL 후보 목록 조회 | `POST /candidates` | `{"question": str}` | `candidate_search_agent` |
-| **운영 성능 진단(선택 후 진단)** — 선택한 후보의 실행계획 진단 | `POST /candidates/diagnose` | `{"sql_id": str}` | `explain_agent` → `knowledge_agent` |
+SQL 생성·SQL 검증·운영 SQL 후보 탐색은 **`POST /query`** 하나로 처리하고, 후보 선택 후 진단은
+**`POST /candidates/diagnose`** 전용 엔드포인트로 분리했다 — 처음엔 이것도 `/query`에 합쳤었지만
+(v2.6.0), `sql_id`는 사용자가 목록에서 카드를 클릭해 나온 값이라 분류할 자연어가 전혀 없다는
+점이 드러나 다시 분리했다(아래 "왜 후보 진단은 분리했나" 참고).
 
-기존 제출 계약인 `POST /query {"question": str}`는 그대로 유지되며, 자연어 진단 질문과 SELECT/WITH SQL 원문을
-모두 받아 라우팅한다. 위 네 경로는 흐름별 전용 진입점으로 추가된 것이고, 응답 계약(`answer`·`contexts`·`trace`)은
-`POST /query`와 동일하다.
+`POST /query`는 `{"question": str}`(자연어 요구사항/질문 또는 SELECT/WITH SQL 원문)만 받고,
+어떤 흐름인지는 서버가 판단한다 — 이 판단은 별도 분류기가 아니라 **기존 Multi-Agent
+Supervisor**(`src/agents.py`의 `build_supervisor`)가 그 자체로 수행한다. Supervisor가
+`query_planner_agent`/`sql_validator_agent`/`candidate_search_agent`로 위임하면, 이
+에이전트들은 전용 도구 하나만 호출해 아래 표의 기존 구현(Plan-Execute 그래프·검증기·후보검색)을
+그대로 실행하고 그 구조화된 결과를 그대로 API 응답으로 돌려준다.
+
+| 흐름                                                           | 경로                          | Supervisor가 위임하는 에이전트                              | 실제 실행                                                                | 응답 mode                                              |
+| -------------------------------------------------------------- | ----------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------ |
+| SQL 생성 — 비즈니스 요구사항에서 SELECT 초안 생성             | `POST /query`               | `query_planner_agent`                                     | `prepare_business_requirement` → 승인 후 `run_business_requirement` | `awaiting_plan_approval` → `business_requirement` |
+| SQL 검증 — 사용자가 입력한 SELECT를 accept/revise/reject 판정 | `POST /query`               | `sql_validator_agent`                                     | `run_sql_validation`                                                   | `sql_validation`                                     |
+| 운영 성능 진단(후보 탐색) — 자연어로 운영 SQL 후보 목록 조회  | `POST /query`               | `candidate_search_agent`                                  | `run_candidate_search`                                                 | `candidate_search`                                   |
+| 운영 성능 진단(선택 후 진단) — 선택한 후보의 실행계획 진단    | `POST /candidates/diagnose` | (결정적 처리, Supervisor 미경유)                            | `run_candidate_diagnose`                                               | `candidate_diagnose`                                 |
+| 일반/지식 질문                                                 | `POST /query`               | `explain_agent` / `knowledge_agent` / `general_agent` | 기존`run_query`와 동일한 자유 응답                                     | `knowledge`                                          |
+
+**Agent별 토큰 정책** (`src/api.py`와 `src/agents.py`):
+`X-Approver-Token` 헤더 자체가 없으면 `POST /query`는 SQL 원문이든 자연어든 Supervisor를
+거치지 않고 기존 계약 그대로 `run_query`로 처리한다(헤더가 없다는 것 자체가 "보호 흐름을 쓸
+생각이 없다"는 신호). 헤더가 있으면(값이 맞든 틀리든) Supervisor가 자연어를 담당 Agent에
+위임한다. `query_planner_agent`·`sql_validator_agent`·`candidate_search_agent`는 전용
+Tool을 실행하기 직전에 토큰을 확인해, 불일치는 403으로 끝낸다. `knowledge_agent`와
+`general_agent`로 분류되면 토큰 검사 없이 그대로 처리된다. UPDATE·DELETE·DROP 등 변경/DDL
+SQL은 헤더 유무와 무관하게 항상 코드로 결정적으로 차단한다(LLM 분류를 거치지 않는다).
+인증 실패 시 DB·MCP·SQLite 쓰기는 발생하지 않는다.
+
+**`POST /candidates/diagnose`**는 `{"sql_id": str, "session_id": str}`만 받고 항상
+`X-Approver-Token`을 검증한다(누락 401, 오류 403). Supervisor를 거치지 않는 이유: 사용자가
+이미 후보 목록에서 정확히 이 카드를 클릭해 선택을 확정했으므로, LLM에게 "무슨 의도냐"를 다시
+묻는 건 불필요한 지연·비용이자 잘못 재해석될 위험만 만든다.
 
 모든 흐름은 Oracle 대상 DB 접근에 **SQLcl MCP** 단일 경로를 사용한다(직접 DB 드라이버 접속 금지). UPDATE/DELETE SQL은 DB 접점 전에 코드 기반 가드레일에서 차단되고 SELECT 조회문만 처리된다.
 
 ### 승인책임자 정책
 
-세 흐름과 위험 도구 실행은 **승인책임자(Approver)**만 사용할 수 있다. 요청마다 `X-Approver-Token` 헤더에 `.env`의 고정 토큰을 포함해야 하며, 누락이면 401, 불일치면 403을 반환한다.
+SQL 생성·SQL 검증·운영 후보 탐색·후보 진단과 위험 도구 실행은 **승인책임자(Approver)**만
+사용할 수 있다. 지식 질문과 일반 응답은 공개한다. 보호 Agent가 실행되려는 시점에
+`X-Approver-Token`을 확인하며, 누락이면 401, 불일치면 403을 반환한다.
 
 ### 마스킹 정책
 
@@ -34,20 +60,20 @@ DB 접점 전에 차단), **실행계획 원문은 절대 사용자에게 입력
 
 ## 활용한 패턴 (Day 1~7)
 
-| # | 패턴 | Day | 위치 |
-|---|---|---|---|
-| 1 | LCEL 구조화 출력 | Day 1 | `src/plan_execute.py`(finalize_node), `src/schemas.py` |
-| 2 | ReAct | Day 3 | `src/agents.py`의 `create_agent` (도구 호출 루프) |
-| 3 | RAG(하이브리드+리랭크+쿼리확장) | Day 2 | `src/retriever.py` |
-| 4 | 다중 도구 | Day 4 | `src/tools.py`(db_tool/gather_stats/create_index) |
-| 5 | MCP 서버 연동 | Day 4 | `src/tools.py`(SQLcl `sql -mcp`, seed v2.4.0부터 Oracle 접근 단일 경로) |
-| 6 | 가드레일 | Day 5 | `src/guardrails.py`, `src/middleware.py` |
-| 7 | HITL | Day 5 | `src/actions.py` (interrupt/Command, 승인/수정/거절) |
-| 8 | 미들웨어 | Day 5 | `src/middleware.py` (4종 + MIDDLEWARE_ORDER) |
-| 9 | Multi-Agent Supervisor | Day 6 | `src/agents.py`(create_supervisor) |
-| 10 | Plan-Execute·장기메모리 | Day 7 | `src/plan_execute.py`(InMemoryStore) |
-| 11 | Observability | Day 7 | `src/tracing.py`(FileTracer → trace.jsonl + 응답 trace 필드 + Langfuse 콜백 병행) |
-| 12 | 평가(RAGAS·LLM-as-Judge) | Day 7 | `run_eval.py`, `src/ragas_eval.py`, `evaluation/test_queries.csv` |
+| #  | 패턴                            | Day   | 위치                                                                                 |
+| -- | ------------------------------- | ----- | ------------------------------------------------------------------------------------ |
+| 1  | LCEL 구조화 출력                | Day 1 | `src/plan_execute.py`(finalize_node), `src/schemas.py`                           |
+| 2  | ReAct                           | Day 3 | `src/agents.py`의 `create_agent` (도구 호출 루프)                                |
+| 3  | RAG(하이브리드+리랭크+쿼리확장) | Day 2 | `src/retriever.py`                                                                 |
+| 4  | 다중 도구                       | Day 4 | `src/tools.py`(db_tool/gather_stats/create_index)                                  |
+| 5  | MCP 서버 연동                   | Day 4 | `src/tools.py`(SQLcl `sql -mcp`, seed v2.4.0부터 Oracle 접근 단일 경로)          |
+| 6  | 가드레일                        | Day 5 | `src/guardrails.py`, `src/middleware.py`                                         |
+| 7  | HITL                            | Day 5 | `src/actions.py` (interrupt/Command, 승인/수정/거절)                               |
+| 8  | 미들웨어                        | Day 5 | `src/middleware.py` (4종 + MIDDLEWARE_ORDER)                                       |
+| 9  | Multi-Agent Supervisor          | Day 6 | `src/agents.py`(create_supervisor)                                                 |
+| 10 | Plan-Execute·장기메모리        | Day 7 | `src/plan_execute.py`(InMemoryStore)                                               |
+| 11 | Observability                   | Day 7 | `src/tracing.py`(FileTracer → trace.jsonl + 응답 trace 필드 + Langfuse 콜백 병행) |
+| 12 | 평가(RAGAS·LLM-as-Judge)       | Day 7 | `run_eval.py`, `src/ragas_eval.py`, `evaluation/test_queries.csv`              |
 
 공식 요건(§5)은 1·3·11·12 4개만 필수이나, 12개 전부를 통합하기로 확정했다(권장되지 않았으나 승인됨 — seed.yaml 참고).
 
@@ -78,20 +104,22 @@ POST /query {"question": "..."}
    응답 {"answer": str, "contexts": [{"doc_id","text"}], "trace": [{"step","input","output"}]}
 ```
 
+자연어 요청은 항상 Multi-Agent Supervisor가 6개 에이전트(explain/knowledge/query_planner/
+sql_validator/candidate_search/general) 중 하나로 위임한다. 보호 Agent가 선택돼도 실제 Tool
+호출 전까지는 권한·DB·MCP·SQLite 접근이 없다. SQL 생성은 먼저 처리 계획을 `awaiting_plan_approval`
+상태로 저장하고, 사람이 승인한 뒤에만 스키마 조회·SQL 생성·실행계획 진단을 재개한다.
+
 ## API 계약 (제출 규약 유지)
 
-기존 미니 프로젝트 제출 계약인 `POST /query`의 **응답 3필드(`answer`·`contexts`·`trace`)는 그대로 유지**되며,
-새로 추가된 세 흐름의 전용 진입점도 동일한 응답 계약을 따른다. 따라서 어떤 요청 유형이든 클라이언트는
-같은 방식으로 답변·근거·trace를 읽을 수 있다.
+기존 미니 프로젝트 제출 계약인 `POST /query`의 **응답 3필드(`answer`·`contexts`·`trace`)는 그대로 유지**된다.
+SQL 생성·검증·후보 탐색·후보 진단도 같은 응답 계약을 공유한다.
 
-| 요청 유형 | 경로 | 요청 본문 | 승인책임자 토큰 |
-|---|---|---|---|
-| 진단 질문 / SELECT 직접 입력 | `POST /query` | `{"question": str}` | 불필요(기존 계약 유지) |
-| SQL 생성 | `POST /generate` | `{"requirement": str}` | 필수 |
-| SQL 검증 | `POST /validate` | `{"sql": str}` | 필수 |
-| 후보 탐색 | `POST /candidates` | `{"question": str}` | 필수 |
-| 후보 선택 후 진단 | `POST /candidates/diagnose` | `{"sql_id": str}` | 필수 |
-| 위험 도구 적용(HITL) | `POST /actions/apply` → `POST /approve/{approval_id}` | `{"tool": str, "args": {}}` | 필수 |
+| 요청 유형                                     | 경로                                 | 요청 본문                                 | 승인책임자 토큰            |
+| --------------------------------------------- | ------------------------------------ | ----------------------------------------- | -------------------------- |
+| 진단 질문 / SELECT 직접 입력 (토큰 헤더 없음) | `POST /query`                      | `{"question": str}`                     | 불필요(기존 계약 그대로)   |
+| SQL 생성·SQL 검증·후보 탐색                 | `POST /query`                      | `{"question": str}`                     | 선택된 보호 Agent에서 필수 |
+| 후보 선택 후 진단                             | `POST /candidates/diagnose`        | `{"sql_id": str, "session_id": str}`    | 필수(항상 검사)            |
+| SQL 생성 계획 승인                            | `POST /plans/{session_id}/approve` | `{"decision": "approve\|modify\|reject"}` | 필수                       |
 
 공통 응답 계약:
 
@@ -130,7 +158,23 @@ docker inspect -f '{{.State.Health.Status}}' sql-tuning-oracle
 
 컨테이너를 완전히 초기화(볼륨 삭제 후 데이터 재적재)하려면 `docker compose down -v && docker compose up -d`.
 
-`ORACLE_DSN`이 설정되지 않았거나 DB 접속/실행이 실패하면(예: Docker가 없는 채점 환경) `db_tool`은
+### SQLcl MCP 연결 저장 (최초 1회, 호스트에서)
+
+SQLcl MCP의 `connect` 도구는 접속 문자열을 바로 안 받고 **connmgr에 미리 저장된 연결 이름**만
+받는다(실측으로 확인 — README 트라이앤에러 회고 "결정 번복 4" 참고). SQLcl/OpenJDK 21 설치와
+같은 성격의 호스트 1회성 설정이므로, 이 연결이 없으면 `db_tool`/후보 탐색/후보 진단 모두
+mock/에러 폴백으로 조용히 넘어간다(Docker/SQLcl가 없는 채점 환경과 동일하게 안전).
+
+```bash
+sql -S /nolog
+SQL> connect -save mini_pjt_conn -savepwd appuser/"AppUser_2026!"@localhost:1521/FREEPDB1
+SQL> exit
+```
+
+연결 이름을 바꾸고 싶으면 `.env`의 `SQLCL_CONNECTION_NAME`도 함께 맞춰준다(기본값 `mini_pjt_conn`).
+
+`ORACLE_DSN`이 설정되지 않았거나 DB 접속/실행이 실패하면(예: Docker가 없는 채점 환경, 또는 이
+연결 저장을 안 한 환경) `db_tool`은
 과거와 동일한 고정 mock 실행계획 텍스트로 조용히 폴백한다(예외를 던지지 않음) — `src/tools.py`의
 `fallback_plan` 참고. 즉 Docker 없이도 이 프로젝트는 그대로 동작하지만, **기본/권장 경로는 실DB
 조회**다.
@@ -175,20 +219,31 @@ Langfuse 컨테이너가 없거나 키가 비어 있어도 `langfuse_callbacks()
 
 # API 서버 (위 "실DB 셋업"으로 Oracle 컨테이너를 먼저 띄워둔 상태 권장)
 cd /home/ubuntu/edu/AX/sds-ax-practice/mini-pjt
-/home/ubuntu/edu/AX/sds-ax-practice/.venv/bin/python -m uvicorn src.agent:app --reload
+./run.sh
 
-# 진단 질문 (자연어 하나만 — POST /query는 여전히 SQL/실행계획을 직접 받지 않는다.
-# 사용자가 SELECT/WITH SQL을 직접 입력하는 경로는 POST /validate로 별도 존재한다.
-# 실행계획 원문은 두 경로 모두 사용자에게 입력받지 않고 SQLcl MCP로 새로 조회한다)
+# 진단 질문 (자연어 하나만, 토큰 헤더 없음 — 기존 계약 그대로.
+# 실행계획 원문은 사용자에게 입력받지 않고 SQLcl MCP로 새로 조회한다)
 curl -s localhost:8000/query -X POST -H 'content-type: application/json' \
   -d '{"question": "주문과 고객을 조인하는 쿼리가 느린데 원인과 개선안을 알려줘"}' | python -m json.tool
 
-# 위험 개선안 적용 (HITL) — 승인 대기 응답을 받는다
-curl -s localhost:8000/actions/apply -X POST -H 'content-type: application/json' -d '{
-  "tool": "create_index", "args": {"table_name": "ORDERS", "index_ddl": "CREATE INDEX idx_orders_date ON orders(order_date)"}
-}'
-# -> {"status": "awaiting_approval", "approval_id": "...", ...}
-curl -s localhost:8000/approve/<approval_id> -X POST -H 'content-type: application/json' -d '{"decision": "approve"}'
+# 같은 엔드포인트에 토큰을 실으면 SQL 생성/검증/후보 탐색까지 열린다
+curl -s localhost:8000/query -X POST -H 'content-type: application/json' \
+  -H 'X-Approver-Token: demo-approver-token' \
+  -d '{"question": "SELECT * FROM orders WHERE status = '"'"'PENDING'"'"'"}' | python -m json.tool
+
+# SQL 생성은 먼저 처리 계획만 만들고 사람이 승인한 뒤 실행한다
+curl -s localhost:8000/query -X POST -H 'content-type: application/json' \
+  -H 'X-Approver-Token: demo-approver-token' \
+  -d '{"question": "이번 달 미결 주문을 고객별로 보여주는 SQL을 만들어줘"}' | python -m json.tool
+# -> {"status": "awaiting_plan_approval", "session_id": "...", ...}
+curl -s localhost:8000/plans/<session_id>/approve -X POST \
+  -H 'content-type: application/json' -H 'X-Approver-Token: demo-approver-token' \
+  -d '{"decision": "approve"}' | python -m json.tool
+
+# 후보 탐색 결과에서 선택한 sql_id로 진단(전용 엔드포인트 — 항상 토큰 필요)
+curl -s localhost:8000/candidates/diagnose -X POST -H 'content-type: application/json' \
+  -H 'X-Approver-Token: demo-approver-token' \
+  -d '{"sql_id": "<후보 탐색 응답의 sql_id>"}' | python -m json.tool
 
 # 평가 (1차 → 개선 → 2차)
 /home/ubuntu/edu/AX/sds-ax-practice/.venv/bin/python run_eval.py --round 1
@@ -230,6 +285,7 @@ negative/guardrail 케이스는 RAGAS로 채점하지 않는다 — 정답이 "�
 ## 트라이앤에러 회고
 
 - **시도했지만 실패/보류한 접근**:
+
   - `analyze_pasted_plan`(사용자가 SQL/실행계획을 직접 붙여넣는 폴백)을 초기에 구현했으나, "붙여넣기 금지 —
     반드시 실시간 DB 조회로만 진단" 정책을 확정하면서 전면 폐기하고 `db_tool`(mock V$SQL 픽스처 키워드 매칭)로
     교체했다.
@@ -267,9 +323,111 @@ negative/guardrail 케이스는 RAGAS로 채점하지 않는다 — 정답이 "�
   `schema_information` 등 9개 도구를 정상적으로 가져오며, explain_agent가 자동으로 사용할 수 있다. 다만
   진단 파이프라인의 기본 경로는 여전히 결정적인 `db_tool` 직접 접속이고, MCP는 확장/탐색 경로로만 둔다
   (진단 결과의 재현성을 LLM 기반 MCP 호출의 비결정성에 의존시키지 않기 위함).
+- **결정 번복 3: 흐름별 전용 엔드포인트(`/generate`·`/validate`·`/candidates`·`/candidates/diagnose`)
+  → 단일 통합 진입점 `POST /assist`(seed v2.5.0)**: 데모 UI가 흐름마다 탭을 나눠 사용자가 매번
+  수동으로 골라야 했는데, 정작 `src/prompts/supervisor.py`에는 "사용자 요청을 분석해 담당 에이전트로
+  라우팅하라"는 프롬프트가 이미 작성돼 있으면서 어디서도 import되지 않는 죽은 코드로 남아 있었다
+  (`test_prompt_modules.py`의 `ac_prompt_module_management`가 role 목록에 `supervisor`를 요구하지만
+  실제 사용 여부는 검증하지 않아 그동안 통과해온 것). 처음엔 이 supervisor 프롬프트로 별도의 가벼운
+  분류기(`classify_intent`)를 새로 만들어 4개 라우트를 대체하려 했으나, 이 프로젝트에는 정확히
+  이 역할을 하는 **기존 Multi-Agent Supervisor**(`src/agents.py`의 `build_supervisor`, 6개
+  에이전트를 이미 거느리고 있음)가 있는데 별도 분류기를 하나 더 두는 건 라우팅 로직이 두 군데로
+  쪼개지는 것이라는 지적을 받고 방향을 바꿨다. 최종적으로: `query_planner_agent`/
+  `sql_validator_agent`/`candidate_search_agent`(기존에는 범용 Oracle MCP 도구를 든 얕은 ReAct
+  에이전트였다)를 각각 `run_business_requirement`/`run_sql_validation`/`run_candidate_search`를
+  그대로 호출하는 전용 도구 하나만 든 에이전트로 다시 만들고, `POST /assist`는 입력을 Supervisor에
+  그대로 넘긴다. 도구의 구조화된 결과(sql_draft/candidates/annotated_sql 등)가 Supervisor의 최종
+  채팅 응답 문장으로 뭉개지지 않게 돌려받는 방법을 세 번 시도 끝에 정했다 — 실제로 서버를 띄워
+  SELECT 하나를 넣어보며 매번 확인했다:
+
+  1) 요청 범위 `ContextVar`에 도구가 결과를 `set()` — 실패. 도구는 정확히 실행되는데(trace에는
+     `validate_user_sql` 호출이 찍힘) 최종 응답은 `mode: "knowledge"` 텍스트로만 돌아왔다.
+     LangGraph가 도구 호출을 별도 asyncio Task로 실행해서, 자식 Task가 `set()`한 값이 부모 Task로
+     역류하지 않기 때문이었다(자식은 생성 시점 값을 읽을 수는 있어도 쓴 값을 부모에게 돌려줄 수
+     없다).
+  2) 도구 결과를 JSON으로 `ToolMessage.content`에 담고 Supervisor 실행 후 최상위 메시지 목록에서
+     찾기 — 역시 실패. `build_supervisor().ainvoke(...)`로 메시지 목록을 직접 덤프해보니
+     `langgraph_supervisor`는 하위 에이전트의 내부 도구 호출 기록(ToolMessage)을 상위 스레드에
+     아예 올려보내지 않고, 그 에이전트의 최종 요약 AIMessage 하나만 상위로 전달한다는 걸 확인했다.
+  3) (채택) 프로세스 전역 `dict`(`src/agents.py`의 `_assist_results`)에 도구가 결과를 담고, 요청마다
+     발급한 UUID를 `ContextVar`(부모→자식 방향이라 안전하게 전파됨)로 각 Task에 전달해 그 키로
+     기록·회수한다. `dict`는 Task마다 복사되는 `ContextVar`와 달리 같은 객체 참조를 공유하므로
+     자식이 쓴 값을 부모가 그대로 읽을 수 있다 — 이건 실제로 붙여서 SELECT/후보탐색/생성 요청을
+     넣어보고 구조화된 필드가 그대로 돌아오는 것까지 확인했다(`src/pipeline.py`의
+     `run_via_supervisor` 참고). `src/prompts/supervisor.py`는
+     이제 `SYSTEM_PROMPT`를 `src/agents.py`가 직접 import하는 실제 Supervisor 프롬프트다.
+     강제로 다시 끼워 맞추기보다 남은 사실을 정직하게 기록해둔다. 분류와 실행이 Supervisor 안에서
+     한 번에 일어나는 만큼 "보호된 의도일 때만" 조건부로 토큰을 검사할 수 없어져, `POST /assist`는
+     입력과 무관하게 항상 `X-Approver-Token`을 요구하도록 정책을 단순화했다(토큰 없이 쓰는 순수
+     진단·지식 질문은 기존 `POST /query`가 그대로 담당하므로 이 정책 변화로 잃는 기능은 없다).
+- **결정 번복 4: `/assist`도 다시 `/query`로 흡수(seed v2.6.0) + 후보 탐색을 실제 V$SQL 동적
+  스캔으로 전환**: `/query`와 `/assist` 두 엔드포인트를 유지할 이유가 없다는 지적을 받아
+  `QueryRequest`를 `question`/`sql_id`/`session_id`로 확장하고 `/assist`를 삭제했다 — 기존처럼
+  `{"question": str}`만 보내는 호출은 완전히 동일하게 동작한다(하위호환). 토큰 헤더 존재 여부로
+  분기하도록 단순화했다(있으면 검증 후 Supervisor 전체 라우팅, 없으면 기존 `run_query`).
+  동시에 후보 탐색(`search_sql_candidates`)이 여전히 고정 Python dict(`QUERY_CATALOG`) 키워드
+  매칭이라는 지적을 받았다 — "자연어로 운영 SQL을 찾는다"는 게 결국 실제 최근 실행된 쿼리를
+  찾아 개선하고 싶은 것이므로, 진짜 Oracle `V$SQL`을 SQLcl MCP로 동적 스캔하도록 바꿨다.
+  `V$SQL`은 인스턴스 메모리에만 있고 `db/init/*.sql`은 볼륨이 빌 때 딱 1회만 실행되므로, 대표
+  운영 쿼리 8개를 DB 초기화가 아니라 **API 서버 기동 시점에 SQLcl MCP로 직접 실행**해 공유 풀에
+  올려두는 웜업(`warmup_operational_queries`, `src/api.py` FastAPI startup 이벤트)을 추가했다 —
+  컨테이너를 재시작해도 API 서버만 다시 뜨면 검색 가능한 상태로 복구된다. 선택한 후보의
+  `sql_id`는 이제 진짜 `V$SQL.SQL_ID`이고, 진단(`run_candidate_diagnose`)은 그 ID로
+  `DBMS_XPLAN.DISPLAY_CURSOR`를 직접 조회한다(공유 풀에서 사라졌으면 다시 탐색하라고 안내,
+  Oracle 미설정이면 기존 `QUERY_CATALOG`로 폴백).
+
+  이 작업 도중 뜻밖의 발견을 했다 — **SQLcl MCP를 통한 실DB 조회 경로가 이 프로젝트 시작부터
+  한 번도 실제로 성공한 적이 없었다.** 실측해보니 원인이 두 가지였다:
+
+  1. `_sqlcl_mcp_fetch_plan`/`_sqlcl_mcp_run_user_sql`이 찾던 도구 이름
+     (`run_statement`/`sql`/`execute_sql`/`run_sql`)이 실제 SQLcl MCP 서버가 노출하는 도구 이름과
+     전혀 안 맞았다(실제 이름은 `sql_run`) — 그래서 매번 조용히 `tools_list[0]`(`connections_list`,
+     완전히 엉뚱한 도구)로 폴백하고 있었다.
+  2. `_sqlcl_connected_config()`가 접속 문자열(`user/pass@dsn`)을 SQLcl CLI 인자로 넘기면 MCP
+     세션도 자동 접속될 거라 가정했는데, 실측해보니 `sql_run` 호출이 항상 "Connection not
+     established"를 반환했다. SQLcl MCP의 `connect` 도구는 CLI 인자가 아니라 **connmgr에 사전
+     저장된 연결 이름만** 받는다("Connection not found: appuser" 에러로 확인) — 그리고 이 호스트엔
+     저장된 연결이 아예 없었다.
+
+  즉 `db_tool`의 "실DB 우선, mock은 안전망" 정책은 코드상 의도는 맞았지만, 실행 단계에서는 항상
+  안전망(mock/에러)만 타고 있었던 것 — 조용한 폴백 설계가 오히려 이 버그를 오래 숨겼다. 호스트에서
+  `sql -S /nolog` 후 `connect -save mini_pjt_conn -savepwd appuser/"AppUser_2026!"@localhost:1521/ FREEPDB1`로 연결을 한 번 저장하고, 도구 이름 후보 목록에 `sql_run`을 추가한 공통 헬퍼
+  `_connect_and_get_sql_tool`(`src/tools.py`)로 정리해 실측으로 해결을 확인했다 — 이제 SQL
+  검증·진단·후보 탐색 모두 진짜 Oracle 응답을 받는다. 이 연결 저장은 SQLcl/OpenJDK 21 설치와
+  같은 성격의 **호스트 1회성 설정**이라 "실DB 셋업" 절에 반영했다.
+
+  MCP 연결이 되고 나서도 V$SQL 동적 검색을 실제로 붙여보며 두 가지를 더 발견해 고쳤다:
+
+  - **같은 후보가 여러 번 나옴**: `V$SQL`은 같은 `SQL_ID`라도 자식 커서(bind peeking 등)별로
+    행이 여러 개일 수 있다 — 후보 목록에 동일한 `sql_id`가 실행 통계만 다르게 3번 찍혀 나왔다.
+    `GROUP BY sql_id`로 합쳐서 해결했다.
+  - **`ORA-00935: group function is nested too deeply`**: `GROUP BY` 쿼리에서
+    `ORDER BY SUM(elapsed_time) DESC`처럼 이미 `SELECT`에 별칭으로 뽑아둔 집계함수를 `ORDER BY`에서
+    다시 감싸면 Oracle이 이 에러를 던진다 — `ORDER BY elapsed_time DESC`(별칭 그대로 참조)로
+    고쳤다. 더 중요한 건 이 에러가 예외가 아니라 sql_run 도구의 **평문 텍스트 응답**으로
+    돌아온다는 점이었다 — CSV 파서가 이걸 헤더/데이터로 잘못 해석해 `AttributeError`로 깨졌다.
+    `_parse_sql_run_csv`가 `"Error"`/`"ORA-"` 패턴을 먼저 감지해 명시적으로 예외를 올리도록
+    고쳐서, 이후 어떤 SQL 실수가 나도 조용히 폴백하게 만들었다.
+- **결정 번복 5: 후보 진단을 다시 `/query`에서 분리(seed v2.7.0) + 생성 SQL도 근본 원인
+  진단까지**: "후보 진단도 Supervisor에 통합할 수 없냐"는 질문에 답하는 과정에서, `sql_id`는
+  사용자가 목록에서 카드를 클릭해 나온 값이라 애초에 분류할 자연어가 없다는 게 명확해졌다 —
+  이미 확정된 선택을 LLM에게 다시 "무슨 의도냐"고 묻는 건 불필요한 지연·비용이자 잘못
+  재해석될 위험만 만든다. 그래서 v2.6.0에서 `/query`에 합쳤던 후보 진단을 `POST /candidates/diagnose` 전용 엔드포인트로 다시 뺐다 — `/query`는 이제 순수하게 "자연어
+  question 입력" 전용이고, 후보 진단은 "이미 확정된 sql_id 선택" 전용이다. 같은 대화에서
+  "생성된 SQL도 후보 진단처럼 근본 원인 분석을 받아야 하지 않냐"는 지적도 나왔다 — 확인해보니
+  `query_planner_agent`의 `review_plan` 단계는 실행계획 위험도(`risk_assessment`, LOW/MEDIUM/
+  HIGH)만 산출하고, 후보 진단·직접 SQL 진단이 받는 근본 원인·개선안 분석(`analysis`,
+  explain_agent+knowledge_agent 기반)은 받지 못하고 있었다 — 위험도만으로는 "왜"가 안 보이는
+  불일치였다. `_review_plan_node`를 async로 바꿔 캐시된 진단 그래프(`pipeline._diagnosis_graph`,
+  다른 두 흐름과 같은 SQL 지문 기반 장기 메모리를 공유)를 함께 호출하도록 확장해 세 흐름 모두
+  같은 품질의 진단을 제공하게 했다. UI에도 대응하는 변경을 넣었다 — SQL 생성/검증 결과에는
+  "수정해서 재요청"(입력창에 채워주기만 함), 진단 결과에는 "수정해서 재진단"(입력창에 채운 뒤
+  별도 "실행계획 진단" 버튼으로 토큰 무관하게 결정적 진단 경로를 강제 재요청) 버튼을 추가했고,
+  채팅 목록도 최신 요청이 위로 오도록 바꿨다.
 - **모델 폴백 관련 트라이앤에러**: 실습 계정의 Bedrock 일일 토큰 쿼터가 반복적으로 고갈되어(`ThrottlingException`),
   `src/common.py`에 `MultiModelChatBedrockConverse`(쓰로틀링 시 `FALLBACK_MODEL_IDS` 순서로 즉시 다음 모델로
   재시도)를 추가했다. 과정에서 실제로 겪은 문제들:
+
   - `_is_throttling_error`가 처음엔 botocore 예외(`e.response`가 dict)만 인식했는데, RAGAS 쪽 anthropic SDK
     (`AsyncAnthropicBedrock`) 예외는 `e.response`가 httpx `Response` 객체라 `.get()` 호출 시
     `AttributeError`로 깨졌다 — dict/객체 두 형태를 모두 안전하게 처리하도록 수정.
@@ -285,6 +443,7 @@ negative/guardrail 케이스는 RAGAS로 채점하지 않는다 — 정답이 "�
     판정 JSON(문장이 많을 때)이 중간에 잘려(`InstructorRetryException: EOF while parsing a list`)
     항상 `N/A`로 떨어지는 문제를 겪었다 — 4096으로 올려 해결.
 - **남은 한계**:
+
   - 로컬 샌드박스에서 Docker 컨테이너 최초 기동 시 알 수 없는 원인(호스트 네트워크 재구성 추정)으로
     컨테이너가 재시작되어 초기화 스크립트가 중간에 끊기는 현상을 겪었다 — `docker compose down -v && up -d`로
     볼륨을 비우고 재기동하면 해결되지만, 채점 환경에서도 동일 증상이 재현될 가능성을 배제할 수 없다. 이
@@ -296,19 +455,25 @@ negative/guardrail 케이스는 RAGAS로 채점하지 않는다 — 정답이 "�
 
 ## 핵심 코드 위치
 
-- `src/agent.py` — FastAPI 진입점 (`POST /query`, `POST /generate`, `POST /validate`, `POST /candidates`,
-  `POST /candidates/diagnose`, `POST /actions/apply`, `POST /approve/{id}`)
-- `src/pipeline.py` — 입력검증·가드레일·SQLcl MCP 조회·네 요청 유형 오케스트레이션(`run_query`,
-  `run_business_requirement`, `run_sql_validation`, `run_candidate_search`, `run_candidate_diagnose`)
-- `src/tools.py` — SQLcl MCP 단일 경계(스키마/후보/실행계획/제한 실행) + 위험 도구(gather_stats/create_index)
+- `src/api.py` — FastAPI 진입점 (`POST /query`와 `POST /candidates/diagnose`, SQL 생성 계획 승인)
+- `src/pipeline.py` — 입력검증·가드레일·SQLcl MCP 조회·요청 유형 오케스트레이션(`run_query`,
+  `run_business_requirement`, `run_sql_validation`, `run_candidate_search`, `run_candidate_diagnose`,
+  `run_via_supervisor` — `/query`가 토큰과 함께 Supervisor에 위임한 결과를 회수)
+- `src/tools.py` — SQLcl MCP 단일 경계(스키마/후보/실행계획/제한 실행), `warmup_operational_queries`
+  (V$SQL 웜업), `search_sql_candidates`(V$SQL 동적 조회 + 카탈로그 폴백) + 위험 도구(gather_stats/create_index)
 - `src/validator.py` — 입력 SELECT의 accept/revise/reject 판정
 - `src/plan_risk.py` — 실행계획 위험 평가와 제한 실행 허용 게이트
 - `src/auth.py` — 승인책임자 토큰 검증(401/403)과 감사 기록
 - `src/storage.py` — checkpoints.sqlite(세션 상태) / memory.sqlite(장기기억) 분리
 - `src/prompts/` — 역할별 system prompt 모듈
 - `src/retriever.py` — 하이브리드 RAG (BM25 + Chroma + MultiQuery + LLM 리랭크)
-- `src/agents.py` — explain_agent/knowledge_agent + Supervisor 조립
-- `src/plan_execute.py` — Plan-Execute 그래프 + 장기 메모리
+- `src/agents.py` — explain_agent/knowledge_agent/query_planner_agent/sql_validator_agent/
+  candidate_search_agent/general_agent + Supervisor 조립. 뒤 세 에이전트는 전용 도구
+  (`generate_sql_draft`/`validate_user_sql`/`search_operational_candidates`)로 pipeline.py의
+  기존 구현을 그대로 호출한다.
+- `src/plan_execute.py` — Plan-Execute 그래프(query_planner의 review_plan 단계가 risk_assessment
+  산출 후 진단 그래프까지 함께 호출 — 생성 SQL도 후보/직접 진단과 동일한 근본 원인 분석을 받음) +
+  진단 그래프 + 장기 메모리
 - `src/actions.py` — HITL 승인 그래프
 - `src/ragas_eval.py` — RAGAS 4지표 (Bedrock 연동 어댑터)
 - `run_eval.py` — 평가 실행기 (규칙기반 + RAGAS, round1/round2 리포트 생성)

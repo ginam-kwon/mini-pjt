@@ -1,6 +1,6 @@
 """src/prompts 모듈 역할 매핑 검증.
 
-AC: router, query_planner, sql_validator, candidate_search, plan_risk,
+AC: supervisor, query_planner, sql_validator, candidate_search, plan_risk,
     explain, knowledge, general 역할의 system prompt가 src/prompts의
     독립 모듈에서 import되고 역할 매핑이 검증된다.
 """
@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 REQUIRED_ROLES = [
-    "router",
+    "supervisor",
     "query_planner",
     "sql_validator",
     "candidate_search",

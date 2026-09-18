@@ -360,7 +360,7 @@ class TestQueryEndpointTraceContract:
     @staticmethod
     def _client():
         from fastapi.testclient import TestClient
-        from src.agent import app
+        from src.api import app
         return TestClient(app)
 
     def test_blocked_request_response_has_trace_array(self):
@@ -467,7 +467,7 @@ def test_query_endpoint_survives_langfuse_callbacks_raising():
     from fastapi.testclient import TestClient
     import src.tracing as tracing_mod
     from src import tools as tools_mod
-    from src.agent import app
+    from src.api import app
 
     with (
         patch.object(tracing_mod, "langfuse_callbacks", side_effect=Exception("boom")),

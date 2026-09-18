@@ -1,18 +1,26 @@
-"""AC: 보호된 세 흐름과 승인 작업은 유효한 X-Approver-Token에서만 동작한다.
+"""AC: 보호된 흐름(SQL 생성·검증·후보 탐색·후보 진단)과 승인 작업은 유효한 X-Approver-Token에서만
+동작한다. seed v2.7.0 기준 진입점 구조:
 
-- 누락 토큰 → 401
-- 잘못된 토큰 → 403
-- 두 경우 모두 SQLcl MCP 호출과 SQLite 쓰기 없음
-- 성공 요청은 마스킹된 감사 기록을 남긴다
+- POST /query {"question": str}: X-Approver-Token 헤더 자체가 없으면(질문이 SQL 원문이든
+  자연어든) 기존 계약 그대로 legacy run_query로 처리한다(토큰 불필요, 항상 200) — 헤더가
+  없다는 것 자체가 "보호 흐름을 쓸 생각이 없다"는 신호이므로 Supervisor/LLM 분류를 거치지
+  않는다. 헤더가 있으면(값이 맞든 틀리든) Multi-Agent Supervisor 전체 라우팅이 열린다. 보호
+  Agent(query_planner_agent/sql_validator_agent/candidate_search_agent)가 전용 Tool을
+  실행하려는 순간에만 토큰을 검사한다 — 오류 403. explain_agent/knowledge_agent/general_agent로
+  분류되면 그대로 처리된다. UPDATE·DELETE·DROP 등 변경/DDL SQL은 헤더 유무와 무관하게 항상
+  코드로 결정적으로 차단한다(LLM 분류를 거치지 않는다).
+- POST /candidates/diagnose {"sql_id": str}: 후보 탐색에서 선택한 sql_id를 진단한다. 분류할
+  자연어가 없는 결정적 액션이라 Supervisor를 거치지 않고, 항상 토큰을 검사한다(누락 401, 오류 403).
+
+두 경우 모두(누락/오류) 보호된 경로에서는 SQLcl MCP 호출과 SQLite 쓰기가 없어야 하고,
+성공 요청은 마스킹된 감사 기록을 남긴다.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -28,12 +36,10 @@ if str(PROJECT_ROOT) not in sys.path:
 VALID_TOKEN = "test-approver-token-123"
 WRONG_TOKEN = "wrong-token-xyz"
 
-PROTECTED_ROUTES = [
-    ("POST", "/generate", {"requirement": "주문 건수를 조회하라"}),
-    ("POST", "/validate", {"sql": "SELECT 1 FROM DUAL"}),
-    ("POST", "/candidates", {"question": "최근 주문 조회 SQL을 찾아줘"}),
-    ("POST", "/candidates/diagnose", {"sql_id": "SQL_001"}),
-    ("POST", "/actions/apply", {"tool": "explain_plan", "args": {}}),
+# question만 있는 /query 요청은 헤더가 "존재할 때만" 검사한다 — 누락이면 legacy run_query로 통과(200).
+QUESTION_BODIES = [
+    ("sql_text", {"question": "SELECT 1 FROM DUAL"}),
+    ("free_text", {"question": "주문 건수를 조회하라"}),
 ]
 
 
@@ -46,50 +52,77 @@ def set_approver_token(monkeypatch):
 @pytest.fixture()
 def client():
     from fastapi.testclient import TestClient
-    from src.agent import app
+    from src.api import app
     return TestClient(app)
 
 
 # ---------------------------------------------------------------------------
-# 1. 누락 토큰 → 401
+# 1. 누락 토큰 → /candidates/diagnose는 401, /query(question만)는 legacy로 통과(200)
 # ---------------------------------------------------------------------------
 
 class TestMissingToken:
-    """X-Approver-Token 헤더 누락 시 401을 반환한다."""
+    def test_candidates_diagnose_missing_token_returns_401(self, client):
+        resp = client.post("/candidates/diagnose", json={"sql_id": "SQL_001"})  # 토큰 헤더 없음
+        assert resp.status_code == 401
 
-    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES)
-    def test_missing_token_returns_401(self, client, method, path, body):
-        resp = client.request(method, path, json=body)  # 토큰 헤더 없음
-        assert resp.status_code == 401, (
-            f"{path}: 누락 토큰에서 401 예상, 실제 {resp.status_code}"
-        )
+    def test_candidates_diagnose_missing_token_has_error_detail(self, client):
+        resp = client.post("/candidates/diagnose", json={"sql_id": "SQL_001"})
+        assert "detail" in resp.json(), "401 응답에 detail 필드가 없다"
 
-    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES)
-    def test_missing_token_has_error_detail(self, client, method, path, body):
-        resp = client.request(method, path, json=body)
-        body_json = resp.json()
-        assert "detail" in body_json, f"{path}: 401 응답에 detail 필드가 없다"
+    @pytest.mark.parametrize("name,body", QUESTION_BODIES)
+    def test_missing_token_falls_back_to_legacy_query(self, client, name, body):
+        """헤더 자체가 없으면 /query 요청은 SQL 원문이든 자연어든 기존 계약대로 토큰 없이
+        legacy run_query로 200 처리된다(seed v2.7.0) — 헤더가 없다는 것 자체가 "보호 흐름을
+        쓸 생각이 없다"는 신호이므로 Supervisor/LLM 분류를 거치지 않는다.
+
+        여기서는 HTTP 레벨 동작(200, run_query로의 위임)만 확인한다 — run_query 자체의 진단
+        로직(SQLcl MCP 조회, LLM 위험평가 등)은 다른 테스트가 이미 검증하므로, 실제 MCP/LLM
+        호출을 피해 빠르고 결정적으로 만든다."""
+        with patch("src.api.run_query") as mock_run_query:
+            mock_run_query.return_value = {"status": "ok", "answer": "", "contexts": [], "trace": []}
+            resp = client.post("/query", json=body)
+        assert resp.status_code == 200, f"{name}: 토큰 헤더 없는 question 요청은 200이어야 한다"
+        mock_run_query.assert_called_once()
+
+    def test_actions_apply_missing_token_returns_401(self, client):
+        resp = client.post("/actions/apply", json={"tool": "gather_stats", "args": {"table_name": "ORDERS"}})
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# 2. 잘못된 토큰 → 403
+# 2. 잘못된 토큰 → 항상 403
 # ---------------------------------------------------------------------------
 
 class TestWrongToken:
-    """잘못된 X-Approver-Token 헤더 시 403을 반환한다."""
-
-    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES)
-    def test_wrong_token_returns_403(self, client, method, path, body):
-        resp = client.request(method, path, json=body, headers={"X-Approver-Token": WRONG_TOKEN})
-        assert resp.status_code == 403, (
-            f"{path}: 잘못된 토큰에서 403 예상, 실제 {resp.status_code}"
+    def test_candidates_diagnose_wrong_token_returns_403(self, client):
+        resp = client.post(
+            "/candidates/diagnose", json={"sql_id": "SQL_001"}, headers={"X-Approver-Token": WRONG_TOKEN}
         )
+        assert resp.status_code == 403
 
-    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES)
-    def test_wrong_token_has_error_detail(self, client, method, path, body):
-        resp = client.request(method, path, json=body, headers={"X-Approver-Token": WRONG_TOKEN})
-        body_json = resp.json()
-        assert "detail" in body_json, f"{path}: 403 응답에 detail 필드가 없다"
+    @pytest.mark.parametrize("name,body", QUESTION_BODIES)
+    def test_query_wrong_token_returns_403(self, client, name, body):
+        """보호 Agent의 authorization_forbidden 응답이 HTTP 403으로 이어지는지 검증한다.
+        sql_text/free_text가 실제로 어느 Agent로 분류될지는 LLM 판단이라 결정적이지 않다
+        (매번 같은 Agent로 간다는 보장이 없다) — run_via_supervisor를 모킹해 "보호 Agent가
+        틀린 토큰을 거부한 결과 → 403" 전달 경로만 결정적으로 검증한다. 분류 자체의 정확도는
+        evaluation/test_queries.csv 라운드 평가가 담당한다."""
+        with patch("src.api.run_via_supervisor") as mock_sup:
+            mock_sup.return_value = {
+                "status": "authorization_forbidden",
+                "reason": "유효하지 않은 X-Approver-Token입니다.",
+                "answer": "", "contexts": [], "trace": [],
+            }
+            resp = client.post("/query", json=body, headers={"X-Approver-Token": WRONG_TOKEN})
+        assert resp.status_code == 403, f"{name}: 잘못된 토큰에서 403 예상, 실제 {resp.status_code}"
+
+    def test_actions_apply_wrong_token_returns_403(self, client):
+        resp = client.post(
+            "/actions/apply",
+            json={"tool": "gather_stats", "args": {"table_name": "ORDERS"}},
+            headers={"X-Approver-Token": WRONG_TOKEN},
+        )
+        assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -97,48 +130,41 @@ class TestWrongToken:
 # ---------------------------------------------------------------------------
 
 class TestNoSideEffectsOnAuthFailure:
-    """인증 실패 요청에서 SQLcl MCP 호출 및 SQLite 쓰기가 발생하지 않는다."""
+    """인증 실패 요청에서 Supervisor 호출·파이프라인 함수 호출·SQLite 쓰기가 전혀 발생하지 않는다."""
 
-    def test_missing_token_no_mcp_call(self, client):
-        """누락 토큰 요청에서 SQLcl MCP 도구가 호출되지 않는다."""
-        with patch("src.pipeline.run_business_requirement") as mock_br, \
-             patch("src.pipeline.run_sql_validation") as mock_val, \
-             patch("src.pipeline.run_candidate_search") as mock_cs:
-            client.post("/generate", json={"requirement": "test"})
-            client.post("/validate", json={"sql": "SELECT 1 FROM DUAL"})
-            client.post("/candidates", json={"question": "test"})
-            mock_br.assert_not_called()
-            mock_val.assert_not_called()
-            mock_cs.assert_not_called()
-
-    def test_wrong_token_no_mcp_call(self, client):
-        """잘못된 토큰 요청에서 SQLcl MCP 도구가 호출되지 않는다."""
+    def test_wrong_token_no_pipeline_call(self, client):
+        """seed v2.7.0: /query는 SQL 원문이어도 Supervisor 자체는 항상 호출된다(분류를 위해).
+        보호 경계는 그 안쪽, 각 보호 Agent의 전용 Tool이 실제 pipeline 함수를 부르기 직전에
+        있다 — 그래서 여기서는 run_via_supervisor가 아니라 그 세 전용 Tool이 위임하는 실제
+        pipeline 함수(run_sql_validation/run_candidate_search/prepare_business_requirement)가
+        전혀 호출되지 않는지를 확인한다."""
         headers = {"X-Approver-Token": WRONG_TOKEN}
-        with patch("src.pipeline.run_business_requirement") as mock_br, \
-             patch("src.pipeline.run_sql_validation") as mock_val, \
-             patch("src.pipeline.run_candidate_search") as mock_cs:
-            client.post("/generate", json={"requirement": "test"}, headers=headers)
-            client.post("/validate", json={"sql": "SELECT 1 FROM DUAL"}, headers=headers)
-            client.post("/candidates", json={"question": "test"}, headers=headers)
-            mock_br.assert_not_called()
-            mock_val.assert_not_called()
-            mock_cs.assert_not_called()
+        with patch("src.pipeline.run_sql_validation") as mock_validate, \
+             patch("src.pipeline.run_candidate_search") as mock_search, \
+             patch("src.pipeline.prepare_business_requirement") as mock_generate, \
+             patch("src.api.run_candidate_diagnose") as mock_cd:
+            client.post("/query", json={"question": "SELECT 1 FROM DUAL"}, headers=headers)
+            client.post("/candidates/diagnose", json={"sql_id": "SQL_001"}, headers=headers)
+            mock_validate.assert_not_called()
+            mock_search.assert_not_called()
+            mock_generate.assert_not_called()
+            mock_cd.assert_not_called()
 
-    def test_missing_token_no_sqlite_write(self, client):
-        """누락 토큰 요청에서 write_audit(SQLite 쓰기)가 호출되지 않는다."""
-        with patch("src.auth.write_audit") as mock_audit:
-            client.post("/generate", json={"requirement": "test"})
-            client.post("/validate", json={"sql": "SELECT 1 FROM DUAL"})
-            client.post("/candidates", json={"question": "test"})
-            mock_audit.assert_not_called()
+    def test_missing_token_no_pipeline_call_for_diagnose(self, client):
+        with patch("src.api.run_candidate_diagnose") as mock_cd:
+            client.post("/candidates/diagnose", json={"sql_id": "SQL_001"})
+            mock_cd.assert_not_called()
 
     def test_wrong_token_no_sqlite_write(self, client):
-        """잘못된 토큰 요청에서 write_audit(SQLite 쓰기)가 호출되지 않는다."""
         headers = {"X-Approver-Token": WRONG_TOKEN}
-        with patch("src.auth.write_audit") as mock_audit:
-            client.post("/generate", json={"requirement": "test"}, headers=headers)
-            client.post("/validate", json={"sql": "SELECT 1 FROM DUAL"}, headers=headers)
-            client.post("/candidates", json={"question": "test"}, headers=headers)
+        with patch("src.api.write_audit") as mock_audit:
+            client.post("/query", json={"question": "SELECT 1 FROM DUAL"}, headers=headers)
+            client.post("/candidates/diagnose", json={"sql_id": "SQL_001"}, headers=headers)
+            mock_audit.assert_not_called()
+
+    def test_missing_token_no_sqlite_write_for_diagnose(self, client):
+        with patch("src.api.write_audit") as mock_audit:
+            client.post("/candidates/diagnose", json={"sql_id": "SQL_001"})
             mock_audit.assert_not_called()
 
 
@@ -149,14 +175,21 @@ class TestNoSideEffectsOnAuthFailure:
 class TestAuditOnSuccess:
     """성공 요청은 마스킹된 감사 기록을 checkpoints.sqlite에 남긴다."""
 
-    def test_write_audit_called_with_masked_hash(self, client, tmp_path):
+    def test_write_audit_called_with_masked_hash(self, client):
         """성공 요청에서 write_audit가 마스킹된 user_hash와 함께 호출된다."""
-        with patch("src.agent.write_audit") as mock_audit, \
-             patch("src.agent.run_sql_validation") as mock_val:
-            mock_val.return_value = {"status": "ok", "result": "accept"}
+        with patch("src.api.write_audit") as mock_audit, \
+             patch("src.api.run_via_supervisor") as mock_sup:
+            # protected/user_hash는 sql_validator_agent 같은 보호 Agent의 전용 Tool이 실제로
+            # 채워주는 필드다(src/agents.py의 validate_user_sql 참고) — api.py는 이 필드를 보고만
+            # write_audit 호출 여부를 결정하므로, 모킹 시에도 그 산출물 형태를 그대로 재현한다.
+            mock_sup.return_value = {
+                "status": "ok", "mode": "sql_validation", "result": "accept",
+                "protected": True, "user_hash": "abcd1234",
+                "answer": "", "contexts": [], "trace": [],
+            }
             client.post(
-                "/validate",
-                json={"sql": "SELECT 1 FROM DUAL"},
+                "/query",
+                json={"question": "SELECT 1 FROM DUAL"},
                 headers={"X-Approver-Token": VALID_TOKEN},
             )
         mock_audit.assert_called_once()
@@ -205,11 +238,11 @@ class TestAuditOnSuccess:
 
 
 # ---------------------------------------------------------------------------
-# 5. 비보호 엔드포인트는 토큰 없이도 동작한다
+# 5. 비보호 엔드포인트/요청은 토큰 없이도 동작한다
 # ---------------------------------------------------------------------------
 
 class TestUnprotectedRoutes:
-    """공개 엔드포인트는 토큰 없이도 접근 가능하다."""
+    """공개 엔드포인트와 (토큰 헤더 없는) 기존 /query 계약은 토큰 없이도 접근 가능하다."""
 
     def test_health_no_token(self, client):
         resp = client.get("/health")
@@ -220,9 +253,17 @@ class TestUnprotectedRoutes:
         assert resp.status_code == 200
 
     def test_query_no_token(self, client):
-        """/query 엔드포인트는 기존 호환성을 위해 토큰 없이 동작한다."""
+        """기존 호환성: 토큰 헤더가 없으면 어떤 question이든 legacy 경로로 200을 반환한다."""
         resp = client.post("/query", json={"question": "UPDATE t SET x=1"})
         # 차단되더라도 401/403이 아닌 200으로 응답해야 한다
+        assert resp.status_code == 200
+
+    def test_query_general_question_no_token(self, client):
+        """일반/지식 질문으로 판정될 만한 입력도 토큰 헤더가 없으면 200으로 동작한다(HTTP 레벨
+        동작만 확인 — run_query 자체의 Supervisor 호출은 다른 테스트가 이미 검증한다)."""
+        with patch("src.api.run_query") as mock_run_query:
+            mock_run_query.return_value = {"status": "ok", "answer": "", "contexts": [], "trace": []}
+            resp = client.post("/query", json={"question": "오늘 저녁 뭐 먹을지 추천해줘"})
         assert resp.status_code == 200
 
 
@@ -233,7 +274,7 @@ class TestUnprotectedRoutes:
 class TestSensitiveDataNotStored:
     """감사 기록에 원문 토큰이 저장되지 않는다."""
 
-    def test_raw_token_not_in_audit(self, tmp_path, monkeypatch):
+    def test_raw_token_not_in_audit(self, tmp_path):
         audit_db = tmp_path / "audit_check.sqlite"
         import src.auth as auth_module
         original_db = auth_module.AUDIT_DB

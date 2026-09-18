@@ -58,31 +58,63 @@ def _oracle_configured() -> bool:
 
 
 def _sqlcl_connected_config() -> dict:
-    """Oracle에 자동 접속하는 SQLcl MCP 서버 설정.
-    ORACLE_DSN, ORACLE_APP_USER, ORACLE_APP_PASSWORD가 있으면 SQLcl이 시작과 함께 접속한다."""
-    oracle_dsn = os.environ.get("ORACLE_DSN", "")
-    oracle_user = os.environ.get("ORACLE_APP_USER", "appuser")
-    oracle_pwd = os.environ.get("ORACLE_APP_PASSWORD", "")
+    """SQLcl MCP 서버 설정.
 
+    이전엔 `sql user/pass@dsn -mcp`처럼 접속 문자열을 CLI 인자로 넘기면 MCP 세션도 자동
+    접속되는 줄 알았는데, 실측해보니 그렇지 않았다 — `sql_run` 도구가 항상
+    "Connection not established"를 반환했다. SQLcl MCP의 `connect` 도구는 CLI 인자가 아니라
+    **connmgr에 미리 저장된 연결 이름**만 받는다("Connection not found: appuser" 에러로 확인).
+    그래서 CLI 인자는 그냥 `-mcp`만 넘기고, 각 세션에서 `connect` 도구를 명시적으로 호출해
+    `SQLCL_CONNECTION_NAME`(기본 mini_pjt_conn)이라는 이름으로 접속한다(`_connect_and_get_sql_tool`).
+    이 이름의 연결은 이 호스트에 한 번 저장해둬야 한다 — README '실DB 셋업' 참고:
+        sql -S /nolog
+        SQL> connect -save mini_pjt_conn -savepwd appuser/"AppUser_2026!"@localhost:1521/FREEPDB1
+    저장돼 있지 않으면 connect 호출이 실패하고, 이 프로젝트 전체의 기존 정책대로 mock/에러
+    폴백으로 조용히 넘어간다(Docker/SQLcl 자체가 없는 채점 환경과 동일하게 처리됨)."""
     base_env = {
         "JAVA_HOME": SQLCL_JAVA_HOME,
         "PATH": f"{SQLCL_JAVA_HOME}/bin:" + os.environ.get("PATH", "/usr/bin:/bin"),
     }
-
-    if oracle_dsn and oracle_user and oracle_pwd:
-        # SQLcl에 접속 정보를 인자로 전달해 MCP 서버 시작과 동시에 Oracle에 접속한다
-        args = [f"{oracle_user}/{oracle_pwd}@{oracle_dsn}", "-mcp"]
-    else:
-        args = ["-mcp"]
-
     return {
         "oracle-sqlcl": {
             "command": os.environ.get("SQLCL_BIN", "sql"),
-            "args": args,
+            "args": ["-mcp"],
             "transport": "stdio",
             "env": base_env,
         }
     }
+
+
+def _sqlcl_connection_name() -> str:
+    return os.environ.get("SQLCL_CONNECTION_NAME", "mini_pjt_conn")
+
+
+async def _connect_and_get_sql_tool(session):
+    """MCP 세션에서 도구 목록을 가져오고 저장된 연결(SQLCL_CONNECTION_NAME)로 접속한 뒤
+    SQL 실행 도구를 반환한다. 모든 SQLcl MCP 호출 지점이 이 순서를 공유한다.
+
+    실제 SQLcl MCP 서버가 노출하는 도구 이름은 'sql_run'이다 — 이전 코드가 찾던 이름들
+    ('run_statement'/'sql'/'execute_sql'/'run_sql')은 전부 실제 도구 목록에 없어서 매번
+    tools_list[0]('connections_list')로 잘못 폴백하고 있었다(실측으로 발견)."""
+    from langchain_mcp_adapters.tools import load_mcp_tools
+
+    tools_list = await load_mcp_tools(session)
+    if not tools_list:
+        raise RuntimeError("SQLcl MCP에서 사용 가능한 도구가 없습니다.")
+    tools = {t.name: t for t in tools_list}
+
+    connect_tool = tools.get("connect")
+    if connect_tool is not None:
+        await connect_tool.ainvoke({"connection_name": _sqlcl_connection_name()})
+
+    sql_tool = None
+    for candidate in ("sql_run", "sqlcl_run", "run_statement", "sql", "execute_sql", "run_sql"):
+        if candidate in tools:
+            sql_tool = tools[candidate]
+            break
+    if sql_tool is None:
+        sql_tool = tools_list[0]
+    return sql_tool
 
 
 async def get_oracle_mcp_tools() -> list:
@@ -117,24 +149,12 @@ async def _sqlcl_mcp_fetch_plan(entry: dict) -> str:
     session_setup부터 마지막 DBMS_XPLAN 조회까지 같은 SQLcl 프로세스를 재사용한다. 매 호출마다
     새 세션을 열면 SQLcl(JVM) 프로세스가 문장 수만큼 재기동돼 지연이 크게 늘어난다."""
     from langchain_mcp_adapters.client import MultiServerMCPClient
-    from langchain_mcp_adapters.tools import load_mcp_tools
 
     config = _sqlcl_connected_config()
     server_name = next(iter(config))
     client = MultiServerMCPClient(config)
     async with client.session(server_name) as session:
-        tools_list = await load_mcp_tools(session)
-        if not tools_list:
-            raise RuntimeError("SQLcl MCP에서 사용 가능한 도구가 없습니다.")
-
-        tools = {t.name: t for t in tools_list}
-        sql_tool = None
-        for candidate in ("run_statement", "sql", "execute_sql", "run_sql"):
-            if candidate in tools:
-                sql_tool = tools[candidate]
-                break
-        if sql_tool is None:
-            sql_tool = tools_list[0]
+        sql_tool = await _connect_and_get_sql_tool(session)
 
         for stmt in entry.get("session_setup", []):
             await sql_tool.ainvoke({"sql": stmt})
@@ -164,24 +184,12 @@ async def _sqlcl_mcp_run_user_sql(sql: str) -> dict:
     접속/실행 실패 시 예외를 그대로 올린다(임의의 사용자 SQL이라 mock 폴백 없음).
     _sqlcl_mcp_fetch_plan과 동일한 이유로 client.session()을 직접 사용한다."""
     from langchain_mcp_adapters.client import MultiServerMCPClient
-    from langchain_mcp_adapters.tools import load_mcp_tools
 
     config = _sqlcl_connected_config()
     server_name = next(iter(config))
     client = MultiServerMCPClient(config)
     async with client.session(server_name) as session:
-        tools_list = await load_mcp_tools(session)
-        if not tools_list:
-            raise RuntimeError("SQLcl MCP에서 사용 가능한 도구가 없습니다.")
-
-        tools = {t.name: t for t in tools_list}
-        sql_tool = None
-        for candidate in ("run_statement", "sql", "execute_sql", "run_sql"):
-            if candidate in tools:
-                sql_tool = tools[candidate]
-                break
-        if sql_tool is None:
-            sql_tool = tools_list[0]
+        sql_tool = await _connect_and_get_sql_tool(session)
 
         hinted_sql = re.sub(
             r"(?i)\bselect\b",
@@ -295,11 +303,9 @@ def _mask_sql_literals(sql: str) -> str:
     return result
 
 
-def search_sql_candidates(question: str, top_k: int = 5) -> list[dict]:
-    """자연어 질문에서 QUERY_CATALOG의 키워드를 매칭해 마스킹된 SQL 후보 목록을 반환한다.
-
-    각 후보는 sql_id, masked_sql, description, rank를 포함한다.
-    매칭 기준은 키워드 길이 합산이며 top_k개 이내로 반환한다."""
+def _fallback_search_sql_candidates(question: str, top_k: int = 5) -> list[dict]:
+    """(기존 로직) 자연어 질문에서 QUERY_CATALOG의 별칭을 키워드로 매칭해 마스킹된 SQL 후보
+    목록을 반환한다. Oracle/SQLcl MCP를 쓸 수 없을 때의 안전망 — db_tool과 동일한 폴백 철학."""
     q = question.lower()
     scored: list[tuple[int, str, dict]] = []
     for key, entry in QUERY_CATALOG.items():
@@ -321,6 +327,222 @@ def search_sql_candidates(question: str, top_k: int = 5) -> list[dict]:
             "relevance_score": score,
         })
     return candidates
+
+
+_SQL_TEXT_KEYWORD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{2,}$")
+
+
+def _relevant_sql_text_keywords(question: str) -> list[str]:
+    """자연어 질문에서 QUERY_CATALOG 별칭 매칭으로 관련 시나리오를 고른 뒤, 그중 실제 SQL
+    원문에 등장하는 영어 토큰(테이블/컬럼명 등)만 추려 V$SQL 검색 키워드로 쓴다. 한국어 별칭이나
+    "hash join"/"range scan"처럼 SQL 원문에 그대로 안 나오는 표현은 제외한다."""
+    q = question.lower()
+    keywords: set[str] = set()
+    for entry in QUERY_CATALOG.values():
+        aliases = entry["aliases"]
+        if any(alias.lower() in q for alias in aliases):
+            sql_lower = entry["sql"].lower()
+            for alias in aliases:
+                alias_lower = alias.lower()
+                if _SQL_TEXT_KEYWORD_RE.match(alias_lower) and alias_lower in sql_lower:
+                    keywords.add(alias_lower)
+    return sorted(keywords)
+
+
+def _parse_sql_run_csv(result: object) -> list[dict]:
+    """sql_run 도구가 반환하는 [{'type': 'text', 'text': '"COL1","COL2"\\nval1,val2\\n'}, ...]
+    형태에서 첫 텍스트 블록을 quoted-CSV로 파싱한다(실측으로 확인한 실제 출력 형식).
+
+    SQL 자체가 실패하면(예: ORA-00935) sql_run은 예외 대신 "Error starting at line..." 같은
+    평문을 돌려준다 — CSV가 아니므로 파싱을 시도하면 DictReader가 헤더/행 길이 불일치로 깨진다.
+    호출부가 예외로 감싸 폴백하게 두지 않고, 여기서 분명한 실패 신호(빈 리스트) 대신 조용히
+    None을 반환해 명시적으로 구분한다."""
+    import csv
+    import io
+
+    if not result:
+        return []
+    first = result[0] if isinstance(result, list) else result
+    text = first.get("text", "") if isinstance(first, dict) else str(first)
+    if not text.strip():
+        return []
+    if text.lstrip().startswith("Error") or "SQL Error" in text or "ORA-" in text:
+        raise RuntimeError(f"sql_run 도구가 오류를 반환했습니다: {text[:200]!r}")
+    reader = csv.DictReader(io.StringIO(text))
+    rows = []
+    for row in reader:
+        if None in row:  # 헤더보다 필드가 많은 손상된 행 — 조용히 건너뛴다
+            continue
+        if any((v or "").strip() for v in row.values()):
+            rows.append(row)
+    return rows
+
+
+async def _warmup_operational_queries_async() -> None:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    config = _sqlcl_connected_config()
+    server_name = next(iter(config))
+    client = MultiServerMCPClient(config)
+    async with client.session(server_name) as session:
+        sql_tool = await _connect_and_get_sql_tool(session)
+        for key, entry in QUERY_CATALOG.items():
+            try:
+                for stmt in entry.get("session_setup", []):
+                    await sql_tool.ainvoke({"sql": stmt})
+                hinted_sql = re.sub(
+                    r"(?i)\bselect\b",
+                    "SELECT /*+ gather_plan_statistics */",
+                    _cap_rows(entry["sql"]),
+                    count=1,
+                )
+                await sql_tool.ainvoke({"sql": hinted_sql})
+            except Exception as e:
+                print(f"[warmup] '{key}' 웜업 실행 실패(무시): {type(e).__name__}: {e}")
+
+
+def warmup_operational_queries() -> None:
+    """대표 운영 쿼리 8개를 실제로 실행해 Oracle 공유 풀(V$SQL)에 올려둔다 — search_sql_candidates가
+    조회할 대상을 만드는 웜업. API 서버 기동 시 1회 호출한다(src/api.py startup 이벤트).
+
+    V$SQL은 인스턴스 메모리에만 있고 db/init/*.sql은 볼륨이 비어있을 때 딱 1회만 실행되므로,
+    "검색 가능한 상태로 만드는 것"은 DB 초기화가 아니라 서버가 뜰 때마다 이 함수가 책임진다 —
+    컨테이너를 재시작해도(볼륨은 그대로라 db/init은 다시 안 돌아도) API 서버만 재기동하면
+    다시 채워진다. Oracle 미설정/SQLcl 없음/실패는 조용히 무시한다(best-effort — 실패해도
+    서버 기동을 막지 않고, search_sql_candidates에는 폴백 경로가 항상 있다)."""
+    if not (sqlcl_available() and _oracle_configured()):
+        return
+    try:
+        _run_async_in_new_thread(_warmup_operational_queries_async(), timeout=120)
+    except Exception as e:
+        print(f"[warmup] 운영 쿼리 웜업 실패(무시): {type(e).__name__}: {e}")
+
+
+_ROWNUM_WRAPPER_RE = re.compile(
+    r"^SELECT\s+(?:/\*\+[^*]*\*/\s+)?\*\s+FROM\s*\(\s*(.*?)\s*\)\s*WHERE\s+ROWNUM\s*<=\s*:?\S+\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_PLAIN_COMMENT_RE = re.compile(r"/\*(?!\+)[^*]*\*/")
+
+
+def _clean_cached_sql_text(sql_text: str) -> str:
+    """warmup_operational_queries()가 붙인 결과 행 제한 래핑과 SQLcl MCP 클라이언트가 자동으로
+    넣는 부가 주석("LLM in use is ...")을 표시용으로 걷어낸다(V$SQL.SQL_TEXT는 실제로 실행된
+    문장을 그대로 담고 있어서 이런 래핑까지 그대로 캐시돼 있다)."""
+    cleaned = _PLAIN_COMMENT_RE.sub("", sql_text).strip()
+    m = _ROWNUM_WRAPPER_RE.match(cleaned)
+    if m:
+        cleaned = m.group(1).strip()
+    return cleaned
+
+
+async def _v_sql_search_async(keywords: list[str], top_k: int) -> list[dict]:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    config = _sqlcl_connected_config()
+    server_name = next(iter(config))
+    client = MultiServerMCPClient(config)
+    async with client.session(server_name) as session:
+        sql_tool = await _connect_and_get_sql_tool(session)
+        like_clauses = " OR ".join(f"LOWER(sql_text) LIKE '%{kw}%'" for kw in keywords)
+        # V$SQL은 같은 SQL_ID라도 자식 커서(bind peeking 등)별로 여러 행을 가질 수 있어
+        # SQL_ID로 GROUP BY해 하나로 합친다 — 아니면 같은 후보가 여러 번 보인다(실측으로 발견).
+        query = (
+            "SELECT sql_id, MIN(sql_text) AS sql_text, SUM(executions) AS executions, "
+            "SUM(elapsed_time) AS elapsed_time, MAX(last_active_time) AS last_active_time "
+            "FROM v$sql "
+            f"WHERE parsing_schema_name = 'APPUSER' AND ({like_clauses}) "
+            "AND LOWER(sql_text) NOT LIKE '%v$sql%' "
+            "GROUP BY sql_id "
+            # SUM(elapsed_time)를 ORDER BY에 다시 쓰면 ORA-00935(group function is nested too
+            # deeply)가 난다(실측으로 확인) — SELECT의 별칭(elapsed_time)을 그대로 참조한다.
+            f"ORDER BY elapsed_time DESC FETCH FIRST {int(top_k)} ROWS ONLY"
+        )
+        result = await sql_tool.ainvoke({"sql": query})
+        return _parse_sql_run_csv(result)
+
+
+def search_sql_candidates(question: str, top_k: int = 5) -> list[dict]:
+    """자연어 질문에서 관련 있는 운영 SQL 후보를 실제 Oracle V$SQL(공유 풀)에서 동적으로
+    조회한다. QUERY_CATALOG의 별칭 매칭으로 "어떤 테이블/시나리오가 관련 있는지"만 결정적으로
+    판정하고(기존 로직 재사용), 그 결과로 정적 텍스트를 돌려주는 대신 V$SQL을 SQLcl MCP로
+    조회해 진짜 sql_id·sql_text·실행 통계를 가져온다 — warmup_operational_queries()가 올려둔
+    대표 쿼리뿐 아니라 같은 테이블을 건드리는 다른 캐시된 쿼리도 함께 잡힌다.
+
+    Oracle 미설정/SQLcl 없음/MCP 실패 시 _fallback_search_sql_candidates()(기존 카탈로그
+    키워드 매칭)로 조용히 폴백한다 — db_tool과 동일한 안전망 철학."""
+    keywords = _relevant_sql_text_keywords(question)
+    if not keywords or not (sqlcl_available() and _oracle_configured()):
+        return _fallback_search_sql_candidates(question, top_k=top_k)
+
+    try:
+        rows = _run_async_in_new_thread(_v_sql_search_async(keywords, top_k))
+    except Exception as e:
+        print(f"[search_sql_candidates] V$SQL 조회 실패({type(e).__name__}: {e}) — 폴백 사용")
+        return _fallback_search_sql_candidates(question, top_k=top_k)
+
+    if not rows:
+        return _fallback_search_sql_candidates(question, top_k=top_k)
+
+    candidates = []
+    for rank, row in enumerate(rows, start=1):
+        sql_text = _clean_cached_sql_text(row.get("SQL_TEXT", ""))
+        executions = row.get("EXECUTIONS", "0")
+        elapsed_us = row.get("ELAPSED_TIME", "0")
+        try:
+            elapsed_secs = float(elapsed_us) / 1_000_000
+        except ValueError:
+            elapsed_secs = 0.0
+        candidates.append({
+            "sql_id": row.get("SQL_ID", ""),
+            "masked_sql": _mask_sql_literals(sql_text),
+            "description": f"실행 {executions}회, 총 소요 {elapsed_secs:.1f}초 (V$SQL 실측)",
+            "rank": rank,
+            "executions": executions,
+            "elapsed_secs": elapsed_secs,
+        })
+    return candidates
+
+
+_SQL_ID_RE = re.compile(r"^[A-Za-z0-9]+$")
+
+
+async def _sqlcl_mcp_fetch_live_plan(sql_id: str) -> dict:
+    """실제 V$SQL.SQL_ID로 SQL 원문과 실제 실행계획(DBMS_XPLAN.DISPLAY_CURSOR)을 가져온다.
+    공유 풀에서 evict돼 더 이상 없는 sql_id는 빈 dict를 반환한다(호출부가 no_answer로 처리)."""
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    config = _sqlcl_connected_config()
+    server_name = next(iter(config))
+    client = MultiServerMCPClient(config)
+    async with client.session(server_name) as session:
+        sql_tool = await _connect_and_get_sql_tool(session)
+        text_result = await sql_tool.ainvoke({
+            "sql": f"SELECT sql_text FROM v$sql WHERE sql_id = '{sql_id}' FETCH FIRST 1 ROWS ONLY"
+        })
+        rows = _parse_sql_run_csv(text_result)
+        if not rows:
+            return {}
+        sql_text = _clean_cached_sql_text(rows[0].get("SQL_TEXT", ""))
+        plan_result = await sql_tool.ainvoke({
+            "sql": f"SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR('{sql_id}', NULL, 'ALLSTATS LAST'))"
+        })
+        return {"sql": sql_text, "execution_plan": str(plan_result)}
+
+
+def fetch_live_sql_plan(sql_id: str) -> dict | None:
+    """주어진 실제 V$SQL.SQL_ID의 SQL 원문·실행계획을 SQLcl MCP로 조회한다. Oracle 미설정/SQLcl
+    없음/조회 실패/공유 풀에서 사라진 sql_id는 None을 반환한다(호출부가 no_answer로 안내)."""
+    if not _SQL_ID_RE.match(sql_id):
+        return None
+    if not (sqlcl_available() and _oracle_configured()):
+        return None
+    try:
+        result = _run_async_in_new_thread(_sqlcl_mcp_fetch_live_plan(sql_id))
+    except Exception as e:
+        print(f"[fetch_live_sql_plan] sql_id='{sql_id}' 조회 실패({type(e).__name__}: {e})")
+        return None
+    return result or None
 
 
 def db_tool(question: str) -> dict | None:

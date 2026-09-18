@@ -3,6 +3,7 @@ __pycache__/
 .env
 chroma_db/
 checkpoints.sqlite
+hitl_checkpoints.sqlite
 memory.sqlite
 agent_log.jsonl
 trace.jsonl

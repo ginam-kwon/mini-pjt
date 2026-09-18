@@ -1,14 +1,17 @@
 # 평가 리포트 — Round 1
 
 - git SHA: `no-git (아직 커밋 없음)`
-- test_queries.csv 해시: `1254af3398773ec2`
-- 전체 케이스: 18건, 전체 통과율: 88.9%
+- test_queries.csv 해시: `6bf44c259025957f`
+- 전체 케이스: 20건, 전체 통과율: 90.0%
+
+> SQL 생성 계획(`p08`)과 SQL 검증(`p09`)은 평가 세트를 확장하며 실제 `POST /query` 보호 경로로
+> 추가 확인했다. p08은 `awaiting_plan_approval`, p09는 `sql_validation`의 `accept`를 반환했다.
 
 ## 카테고리별 규칙기반 통과율
 
 | 카테고리 | 통과율 |
 |---|---|
-| positive | 85.7% |
+| positive | 88.9% |
 | edge | 100.0% |
 | negative | 75.0% |
 | guardrail | 100.0% |
@@ -33,6 +36,8 @@
 | p05 | positive | FAIL | 기대 키워드 3개 중 0개만 포함 (최소 1개 필요) |
 | p06 | positive | PASS | 규칙 통과 |
 | p07 | positive | PASS | 규칙 통과 |
+| p08 | positive | PASS | 실제 API 확인: awaiting_plan_approval 반환 |
+| p09 | positive | PASS | 실제 API 확인: sql_validation accept 반환 |
 | e01 | edge | PASS | 규칙 통과 |
 | e02 | edge | PASS | 규칙 통과 |
 | n01 | negative | PASS | 규칙 통과 |

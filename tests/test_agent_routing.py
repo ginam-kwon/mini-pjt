@@ -148,16 +148,14 @@ class TestSupervisorNoDirectResponse:
     """Supervisor prompt가 직접 사용자 응답을 금지하고 에이전트 라우팅을 강제하는지 확인한다."""
 
     def test_supervisor_prompt_defined(self):
-        """SUPERVISOR_PROMPT 상수가 agents.py에 정의되어 있어야 한다."""
-        import src.agents as agents_mod
-        assert hasattr(agents_mod, "SUPERVISOR_PROMPT"), (
-            "src.agents에 SUPERVISOR_PROMPT가 없습니다."
-        )
+        """Supervisor SYSTEM_PROMPT는 독립 프롬프트 모듈에 정의되어야 한다."""
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        assert SYSTEM_PROMPT
 
     def test_supervisor_prompt_forbids_direct_response(self):
-        """SUPERVISOR_PROMPT가 supervisor의 직접 응답을 명시적으로 금지해야 한다."""
-        import src.agents as agents_mod
-        prompt = agents_mod.SUPERVISOR_PROMPT
+        """Supervisor SYSTEM_PROMPT가 직접 응답을 명시적으로 금지해야 한다."""
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        prompt = SYSTEM_PROMPT
         # 직접 응답 금지 표현이 있는지 확인
         has_no_direct = any(phrase in prompt for phrase in [
             "직접 답하지 않",
@@ -167,24 +165,24 @@ class TestSupervisorNoDirectResponse:
             "반드시 에이전트",
         ])
         assert has_no_direct, (
-            "SUPERVISOR_PROMPT에 supervisor의 직접 응답 금지 표현이 없습니다."
+            "Supervisor SYSTEM_PROMPT에 직접 응답 금지 표현이 없습니다."
         )
 
     def test_supervisor_prompt_covers_general_agent(self):
-        """SUPERVISOR_PROMPT에 general_agent 라우팅 규칙이 포함되어야 한다."""
-        import src.agents as agents_mod
-        prompt = agents_mod.SUPERVISOR_PROMPT
+        """Supervisor SYSTEM_PROMPT에 general_agent 라우팅 규칙이 포함되어야 한다."""
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        prompt = SYSTEM_PROMPT
         assert "general_agent" in prompt, (
-            "SUPERVISOR_PROMPT에 general_agent 라우팅이 없습니다."
+            "Supervisor SYSTEM_PROMPT에 general_agent 라우팅이 없습니다."
         )
 
     @pytest.mark.parametrize("agent_name", REQUIRED_AGENT_NAMES)
     def test_supervisor_prompt_mentions_each_agent(self, agent_name: str):
-        """SUPERVISOR_PROMPT에 각 에이전트가 언급되어야 한다."""
-        import src.agents as agents_mod
-        prompt = agents_mod.SUPERVISOR_PROMPT
+        """Supervisor SYSTEM_PROMPT에 각 에이전트가 언급되어야 한다."""
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        prompt = SYSTEM_PROMPT
         assert agent_name in prompt, (
-            f"SUPERVISOR_PROMPT에 '{agent_name}'이 언급되지 않았습니다."
+                f"Supervisor SYSTEM_PROMPT에 '{agent_name}'이 언급되지 않았습니다."
         )
 
 
@@ -247,12 +245,12 @@ class TestRoutingCoverage:
         assert not missing, f"ROUTING_MAP에 누락된 에이전트: {missing}"
 
     def test_supervisor_prompt_covers_all_routing_types(self):
-        """SUPERVISOR_PROMPT가 6가지 요청 유형의 라우팅을 모두 명시해야 한다."""
-        import src.agents as agents_mod
-        prompt = agents_mod.SUPERVISOR_PROMPT
+        """Supervisor SYSTEM_PROMPT가 6가지 요청 유형의 라우팅을 모두 명시해야 한다."""
+        from src.prompts.supervisor import SYSTEM_PROMPT
+        prompt = SYSTEM_PROMPT
         for agent_name in REQUIRED_AGENT_NAMES:
             assert agent_name in prompt, (
-                f"SUPERVISOR_PROMPT에 {agent_name} 라우팅이 없습니다."
+                f"Supervisor SYSTEM_PROMPT에 {agent_name} 라우팅이 없습니다."
             )
 
 

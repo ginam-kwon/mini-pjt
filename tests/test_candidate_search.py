@@ -1,12 +1,20 @@
 """AC: 자연어 운영 성능 요청은 마스킹된 SQL 원문을 포함한 후보 목록을 반환하고,
 후보 검색 평가 fixture의 기대 SQL은 반환 후보 목록에 포함된다.
 
+seed v2.6.0부터 search_sql_candidates()는 기본적으로 실제 Oracle V$SQL을 SQLcl MCP로 동적
+조회한다(warmup_operational_queries()가 올려둔 대표 쿼리 + 그 외 캐시된 쿼리까지 함께 반환).
+이 파일의 기존 결정적 테스트는 _oracle_configured/sqlcl_available을 강제로 False로 만들어
+"Oracle 미설정 시 폴백"(_fallback_search_sql_candidates, 기존 QUERY_CATALOG 키워드 매칭) 경로를
+검증한다 — LLM/실DB 호출 없이 재현 가능해야 한다는 이 프로젝트의 테스트 철학을 그대로 따른다.
+실제 V$SQL 동적 경로는 TestLiveVSqlSearch에서 MCP 세션을 mock해 별도로 검증한다.
+
 검증 항목:
-1. search_sql_candidates가 자연어 질문에 대해 후보 목록을 반환한다.
+1. search_sql_candidates가 자연어 질문에 대해 후보 목록을 반환한다(폴백 경로).
 2. 각 후보는 sql_id, masked_sql, rank 필드를 포함한다.
 3. masked_sql에 원본 문자열 리터럴(비교 목적 단일따옴표 값)이 제거되고 :param_N으로 대체된다.
-4. candidate_fixtures.csv의 기대 sql_id가 실제 반환 후보 목록에 포함된다.
+4. candidate_fixtures.csv의 기대 sql_id가 실제 반환 후보 목록에 포함된다(폴백 경로).
 5. 매칭이 없는 질문에 대해 빈 리스트를 반환한다.
+6. 실제 V$SQL 동적 조회 경로(성공/실패/폴백)가 올바르게 동작한다.
 """
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ import csv
 import re
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,6 +31,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 FIXTURES_CSV = PROJECT_ROOT / "evaluation" / "candidate_fixtures.csv"
+
+
+@pytest.fixture(autouse=True)
+def _force_offline_fallback(monkeypatch):
+    """이 파일의 기존 테스트는 모두 Oracle 미설정 폴백 경로(결정적)를 검증한다 —
+    Oracle이 실제로 떠 있는 개발 환경에서도 이 파일이 느려지거나 비결정적이 되지 않게 한다."""
+    monkeypatch.setattr("src.tools._oracle_configured", lambda: False)
 
 
 def _load_fixtures() -> list[dict]:
@@ -229,3 +245,87 @@ class TestCandidateSearchFixtureCoverage:
                     assert lit not in cand["masked_sql"], (
                         f"[{row['id']}] sql_id='{cand['sql_id']}' masked_sql에 리터럴 {lit}이 남아 있습니다."
                     )
+
+
+# ---------------------------------------------------------------------------
+# 실제 V$SQL 동적 조회 경로 (seed v2.6.0) — MCP 세션을 mock해 결정적으로 검증
+# ---------------------------------------------------------------------------
+
+class TestParseSqlRunCsv:
+    """sql_run 도구의 실측 반환 형식([{'type':'text','text': quoted-CSV}, ...])을 파싱한다."""
+
+    def test_parses_quoted_csv_blocks(self):
+        from src.tools import _parse_sql_run_csv
+        blocks = [{"type": "text", "text": '"SQL_ID","EXECUTIONS"\n"abc123",5\n"def456",10\n\n'}]
+        rows = _parse_sql_run_csv(blocks)
+        assert rows == [{"SQL_ID": "abc123", "EXECUTIONS": "5"}, {"SQL_ID": "def456", "EXECUTIONS": "10"}]
+
+    def test_empty_result_returns_empty_list(self):
+        from src.tools import _parse_sql_run_csv
+        assert _parse_sql_run_csv([]) == []
+        assert _parse_sql_run_csv([{"type": "text", "text": ""}]) == []
+
+
+class TestCleanCachedSqlText:
+    """웜업 시 붙인 ROWNUM 래핑과 MCP 클라이언트의 부가 주석을 걷어낸다(실측 형식 기준)."""
+
+    def test_strips_wrapper_and_comment(self):
+        from src.tools import _clean_cached_sql_text
+        raw = (
+            "SELECT /* LLM in use is UNKNOWN-LLM */ /*+ gather_plan_statistics */ * "
+            "FROM ( SELECT 1 FROM dual ) WHERE ROWNUM <= 1000"
+        )
+        assert _clean_cached_sql_text(raw) == "SELECT 1 FROM dual"
+
+    def test_plain_sql_without_wrapper_unchanged(self):
+        from src.tools import _clean_cached_sql_text
+        raw = "SELECT * FROM orders WHERE customer_id = 1"
+        assert _clean_cached_sql_text(raw) == raw
+
+
+class TestLiveVSqlSearch:
+    """search_sql_candidates가 Oracle 설정 시 실제 V$SQL 동적 조회 경로(_v_sql_search_async)를
+    타는지, 실패/빈 결과 시 폴백으로 안전하게 넘어가는지 MCP 세션을 mock해 검증한다."""
+
+    def test_live_rows_are_converted_to_candidates(self, monkeypatch):
+        from src import tools
+        monkeypatch.setattr(tools, "_oracle_configured", lambda: True)
+        monkeypatch.setattr(tools, "sqlcl_available", lambda: True)
+        fake_rows = [
+            {"SQL_ID": "abc123xyz", "SQL_TEXT": "SELECT * FROM orders WHERE customer_id = 1",
+             "EXECUTIONS": "3", "ELAPSED_TIME": "500000", "LAST_ACTIVE_TIME": "2026-09-18"},
+        ]
+        with patch.object(tools, "_v_sql_search_async", new=AsyncMock(return_value=fake_rows)):
+            result = tools.search_sql_candidates("주문 고객 조인 쿼리가 느려요")
+        assert result[0]["sql_id"] == "abc123xyz"
+        assert result[0]["executions"] == "3"
+        assert ":param_" in result[0]["masked_sql"]
+        assert "customer_id" in result[0]["masked_sql"]
+
+    def test_falls_back_when_no_live_rows(self, monkeypatch):
+        from src import tools
+        monkeypatch.setattr(tools, "_oracle_configured", lambda: True)
+        monkeypatch.setattr(tools, "sqlcl_available", lambda: True)
+        with patch.object(tools, "_v_sql_search_async", new=AsyncMock(return_value=[])):
+            result = tools.search_sql_candidates("주문 고객 조인")
+        assert any(c["sql_id"] == "orders_customers_join" for c in result)
+
+    def test_falls_back_on_mcp_exception(self, monkeypatch):
+        from src import tools
+        monkeypatch.setattr(tools, "_oracle_configured", lambda: True)
+        monkeypatch.setattr(tools, "sqlcl_available", lambda: True)
+        monkeypatch.setattr(
+            tools, "_run_async_in_new_thread",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mcp down")),
+        )
+        result = tools.search_sql_candidates("주문 고객 조인")
+        assert any(c["sql_id"] == "orders_customers_join" for c in result)
+
+    def test_no_relevant_keywords_uses_fallback_without_mcp_call(self, monkeypatch):
+        from src import tools
+        monkeypatch.setattr(tools, "_oracle_configured", lambda: True)
+        monkeypatch.setattr(tools, "sqlcl_available", lambda: True)
+        with patch.object(tools, "_v_sql_search_async", new=AsyncMock()) as mock_search:
+            result = tools.search_sql_candidates("전혀관계없는xyz쿼리")
+        mock_search.assert_not_called()
+        assert result == []
