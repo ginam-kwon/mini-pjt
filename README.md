@@ -400,19 +400,47 @@ python -m pytest tests/test_evaluation_contract.py -q
 
 ## RAGAS 평가 결과
 
-`evaluation/round2_report.md`(2차, 최종) 기준 — positive/edge 케이스 한정 평균:
+`evaluation/round2_report.md`(2차, 최종) 기준 — positive/edge 케이스 한정 평균(전체 통과율 90.0%,
+20건 중 18건 PASS):
 
-- context_recall: 0.625 (임계값 ≥0.6 충족 ✅)
-- context_precision: 1.000 (임계값 ≥0.6 충족 ✅)
-- faithfulness: N/A — RAGAS instructor 어댑터의 `max_tokens` 절단 버그(트라이앤에러 회고 참고)를
-  round2 리포트 확정 직후 수정했으나, 그 시점에 계정 쿼터가 고갈돼 수정 코드로 재검증하지 못한
-  상태다(임계값 ≥0.7, 미충족 표기)
-- answer_relevancy: 0.227 (임계값 ≥0.7, 미충족)
+- context_precision: 0.778 (임계값 ≥0.6 충족 ✅)
+- context_recall: 0.380 (임계값 ≥0.6, 미충족 ❌)
+- answer_relevancy: 0.252 (임계값 ≥0.7, 미충족 ❌)
+- faithfulness: N/A — RAGAS instructor 어댑터가 faithfulness의 NLI 판정(statements+verdict) JSON을
+  `max_tokens` 한도에서 잘라먹는 문제가 이번 실행에서도 재현됐다. round2 리포트를 확정한 직후
+  `max_tokens`를 4096→8192로 다시 올렸으나, 그 수정을 반영한 재실행으로 실측치를 아직 확인하지
+  못한 상태다(임계값 ≥0.7, 미충족 표기).
 
 임계값: faithfulness/answer_relevancy ≥ 0.7, context_precision/context_recall ≥ 0.6.
 negative/guardrail 케이스는 RAGAS로 채점하지 않는다 — 정답이 "거부"인 케이스에 faithfulness 같은 지표를
 적용하는 것은 무의미하기 때문이며, 이 케이스들은 `expected_traits`/`forbidden` 컬럼 기준 규칙기반으로만
 판정한다(자세한 근거는 `seed.yaml`의 `평가 척도 적합성` 원칙 참고).
+
+RAGAS 4지표 중 answer_relevancy·context_recall 2개는 아직 임계값 미충족이다 — 이번 라운드에서는
+Multi-Agent Supervisor 라우팅 버그(자연어 성능 문의를 candidate_search_agent로 위임하지 않고 일반
+채팅으로 응답하던 문제)와 V$SQL CSV 파싱 버그("no rows selected"를 가짜 후보 행으로 오인식하던
+문제)를 고쳐 규칙기반 통과율을 55%→90%로 끌어올리는 데 우선순위를 뒀다. RAGAS 미달 지표는 다음
+라운드에서 답변 프롬프트(핵심만 담아 관련성 높이기)와 컨텍스트 구성(explain_agent/knowledge_agent가
+실제 호출한 도구 응답을 retrieved_contexts로 노출하는 로직을 이번에 새로 추가했다)을 조정해 계속
+개선한다.
+
+### 미달 지표 원인 분석
+
+- **context_recall (0.380)** — 시스템 답변 품질보다 **평가 스크립트 쪽 결함**이 더 크다.
+  `run_eval.py`가 RAGAS의 `reference`(정답 근거)를 `test_queries.csv`의 `expected_traits`
+  컬럼을 그대로 세미콜론으로 이어붙여서 만든다(예: `"형변환;TO_NUMBER;인덱스"`). RAGAS는 이
+  문자열을 자연스러운 정답 문장으로 가정하고 클레임 단위로 분해해 컨텍스트가 그 클레임을
+  뒷받침하는지 채점하는데, 단어 나열은 문장으로서의 클레임 분해가 불안정해 recall이 실제보다
+  낮게 나온다. → 다음 라운드에서 CSV에 자연어 reference 문장 컬럼을 추가하는 것으로 개선 예정.
+- **answer_relevancy (0.252)** — RAGAS는 답변에서 "이 답이 어떤 질문의 답일지"를 역으로 여러 개
+  생성해 원래 질문과의 임베딩 유사도를 평균낸다. 우리 진단 답변(`_format_analysis_as_answer`)은
+  원인 여러 개 + 근거 + 개선안 여러 개를 한 번에 나열하는 포괄적 구조라, 역생성된 질문들이 원래의
+  좁은 질문 하나와 흩어져 매칭되면서 평균이 낮아지는 경향이 있다. 이는 **답변의 포괄성(사용자
+  입장에서는 장점)과 이 지표 사이의 실제 트레이드오프**이며, 진단 내용을 쳐내서 점수만 올리는
+  식의 수정은 하지 않았다 — 대신 summary 문장이 사용자 질문의 표현을 더 직접 반영하도록 하는 등
+  내용을 해치지 않는 선에서 다음 라운드에 조정할 계획이다.
+- **faithfulness (N/A)** — 위 "RAGAS 평가 결과" 항목 참고 (`max_tokens` 절단 문제, 수정은 반영했으나
+  재검증 전).
 
 ## 인-아웃 세트 통과율 (자체 평가)
 
