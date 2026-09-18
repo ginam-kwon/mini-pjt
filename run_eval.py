@@ -113,6 +113,13 @@ def grade_item(item: dict, result: dict) -> tuple[str, str]:
 
 def run(round_no: int) -> dict:
     from src.ragas_eval import RAGAS_THRESHOLDS, average_scores, score_item
+    from src.tools import warmup_operational_queries
+
+    # api.py의 FastAPI startup 이벤트(대표 운영 쿼리를 V$SQL 공유 풀에 올리는 웜업)는 TestClient를
+    # `with`로 열지 않으면 절대 발동하지 않는다(Starlette lifespan은 컨텍스트 매니저로만 트리거된다).
+    # candidate_search_agent/explain_agent가 조회할 대상이 비어 있으면 안 되므로, 평가 루프를 돌기
+    # 전에 여기서 명시적으로 한 번 실행해 실제 서버 기동과 동일한 상태를 만든다.
+    warmup_operational_queries()
 
     items = list(csv.DictReader(CSV_PATH.open(encoding="utf-8")))
     counts = {PASS: 0, FAIL: 0, ERROR: 0}
